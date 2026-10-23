@@ -148,25 +148,63 @@ Known caveats:
 - `gh` authenticated with `repo` scope, `jq`, `git`
 - `gh stack` extension for use case 08
 
-## One-time setup
+## Repository setup (precondition)
 
-1. **Bootstrap the code.** Push this POC to the current default branch (`main`) *before* the rename, so no release run starts on a commit without a PR. Use a conventional message, e.g. `chore: CK-9000 bootstrap release automation POC`.
-2. **Run the setup script.** It asks before every change and can be re-run:
+The release flow only works when the repository settings and rulesets are in place. This is a **precondition for this POC and for every repository** that adopts the flow: without the rulesets, an invalid PR title can be merged, a hotfix line can be deleted or pushed to directly, and anyone can create a tag that collides with a calculated version.
 
-   ```bash
-   scripts/setup-github.sh avall/homelab-poc-semantic-version
-   ```
+**Order matters.** The required checks `build` and `pr-title` only exist once their workflows are on the default branch. `pr-title` runs on `pull_request_target`, which always takes the workflow from the default branch. So:
 
-   - renames `main` to `master` (`POST /repos/{owner}/{repo}/branches/main/rename`);
-   - squash only, `squash_merge_commit_title=PR_TITLE`, `squash_merge_commit_message=BLANK`, delete branch on merge;
-   - branch ruleset on `~DEFAULT_BRANCH` and `refs/heads/hotfix/*`: PR required, squash only, required checks `build` and `pr-title`, branches must be up to date before merging (a PR behind its base needs "Update branch" and green checks again), no force push, no deletion;
-   - tag ruleset on `refs/tags/*.*.*` (also matches `1.0.1-hotfix.1`): creation, update and deletion restricted, bypass for GitHub Actions and repository admins;
-   - immutable releases (`PUT /repos/{owner}/{repo}/immutable-releases`).
-3. **Update local clones** after the rename:
+1. **Bootstrap the code** with a direct push to the default branch, *before* any ruleset, with `[skip ci]` so the release guard does not fail on a commit without a PR. Example: `ci: CK-1234 bootstrap release automation [skip ci]`.
+2. **Open a test PR** so that `build` and `pr-title` run once (the ruleset UI suggests checks that ran recently).
+3. **Apply the settings below**, in the UI or with the script.
+4. **Check the protection:** a PR titled `wip` must fail `pr-title` and its merge button must be blocked.
 
-   ```bash
-   git branch -m main master && git fetch origin && git branch -u origin/master master && git remote set-head origin -a
-   ```
+### Settings in the GitHub UI
+
+| Where | Setting | Value |
+|---|---|---|
+| Settings › General › Default branch | Rename (pencil icon) | `master` |
+| Settings › General › Pull Requests | Allow merge commits | off |
+| | Allow squash merging | on, default message **Pull request title** (`PR_TITLE` + `BLANK`) |
+| | Allow rebase merging | off |
+| | Automatically delete head branches | on (deletes `CK-...` work branches; `hotfix/*` lines are protected by the ruleset) |
+| Settings › General › Releases | Enable release immutability | on |
+| Settings › Actions › General | Actions permissions | allow `actions/*`, `amannn/action-semantic-pull-request`, `cycjimmy/semantic-release-action` (or all actions) |
+| | Workflow permissions | read is enough: each workflow asks for `contents: write` itself |
+
+**Settings › Rules › Rulesets › New branch ruleset** `release-branches`:
+
+- Enforcement status: **Active**. Bypass list: empty.
+- Target branches: **Include default branch** and **Include by pattern** `hotfix/*`.
+- Rules:
+  - Restrict deletions.
+  - Block force pushes.
+  - Require a pull request before merging: required approvals `0`, allowed merge methods **Squash** only.
+  - Require status checks to pass: click **+ Add checks** and type `build` and `pr-title`. The UI accepts any text, so the names must match the job names exactly; a check that never reports blocks every PR. Enable **Require branches to be up to date before merging** and **Do not require status checks on creation** (`hotfix-start` creates `hotfix/<tag>` without a PR).
+
+**Settings › Rules › Rulesets › New tag ruleset** `release-tags`:
+
+- Enforcement status: **Active**. Bypass list: **Repository admin**.
+- Target tags: **Include by pattern** `*.*.*` (also matches `1.0.1-hotfix.1`).
+- Rules: **restrict updates** and **restrict deletions**. Do **not** enable *Restrict creations*: the bypass list never offers GitHub Actions (the `GITHUB_TOKEN` of the release workflows), so that rule would block every release. A manual tag that collides with a calculated version makes the release fail (semantic-release and `hotfix-release` never reuse an existing tag); it never overwrites one. To also restrict creations, add a GitHub App of your own to the bypass list and create the tags with its token (`actions/create-github-app-token`).
+
+The same settings by script (asks before every change, can be re-run):
+
+```bash
+scripts/setup-github.sh avall/homelab-poc-semantic-version
+```
+
+Rulesets on a private repository need GitHub Pro, Team or Enterprise; public repositories have them on every plan.
+
+### Avoiding the manual setup for each new repository
+
+Bootstrapping and configuring every repository by hand does not scale. The proposal (§6, "Precondition and automation") describes the fix: a template repository for the files, organization rulesets targeted by a custom property, required workflows from a central repository, and Terraform for the per-repository settings. A personal account has no organization rulesets: there, the template repository plus `scripts/setup-github.sh` is the shortest path.
+
+If the default branch is renamed after cloning, update local clones:
+
+```bash
+git branch -m main master && git fetch origin && git branch -u origin/master master && git remote set-head origin -a
+```
 
 ## Build and run locally
 
