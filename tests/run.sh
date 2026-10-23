@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Table-driven tests for scripts/hotfix-version.sh and scripts/snapshot-version.sh. No network.
+# Table-driven tests for scripts/hotfix-version.sh, scripts/snapshot-version.sh and scripts/check-commit-message.sh. No network.
 # Usage: bash tests/run.sh
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOTFIX="$ROOT/scripts/hotfix-version.sh"
 SNAPSHOT="$ROOT/scripts/snapshot-version.sh"
+COMMIT_MSG="$ROOT/scripts/check-commit-message.sh"
 PASS=0
 FAIL=0
 
@@ -63,6 +64,33 @@ for case in "${CASES[@]}"; do
   else
     FAIL=$((FAIL + 1))
     echo "FAIL $name: expected rc=$want_rc out='$want_out', got rc=$rc out='$out'"
+  fi
+done
+
+# Commit message guard: name | expected subject | message (printf %b escapes) | expected exit (0 or err)
+T="fix: CK-1 handle null (#7)"
+MSG_CASES=(
+  "guard: subject only|$T|$T|0"
+  "guard: subject with trailing newline|$T|$T\n|0"
+  "guard: Dependabot trailers|$T|$T\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\nCo-authored-by: Jandrinet <a@b.c>|0"
+  "guard: co-author trailer only|$T|$T\n\nCo-authored-by: Ana <ana@x.y>|0"
+  "guard: edited subject|$T|fix: CK-1 edited in the merge dialog (#7)|err"
+  "guard: subject without PR number|$T|fix: CK-1 handle null|err"
+  "guard: body text added|$T|$T\n\nsome description|err"
+  "guard: breaking change footer added|$T|$T\n\nBREAKING CHANGE: removes the endpoint|err"
+  "guard: trailer without blank line|$T|$T\nCo-authored-by: Ana <ana@x.y>|err"
+  "guard: empty message|$T||err"
+)
+for case in "${MSG_CASES[@]}"; do
+  IFS='|' read -r name expected message want_rc <<<"$case"
+  out=$(printf '%b' "$message" | bash "$COMMIT_MSG" "$expected" 2>&1)
+  rc=$?
+  if [[ "$want_rc" == "0" && $rc -eq 0 ]] || [[ "$want_rc" == "err" && $rc -ne 0 ]]; then
+    PASS=$((PASS + 1))
+    echo "PASS $name"
+  else
+    FAIL=$((FAIL + 1))
+    echo "FAIL $name: expected rc=$want_rc, got rc=$rc out='$out'"
   fi
 done
 

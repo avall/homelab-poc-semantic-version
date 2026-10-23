@@ -334,7 +334,7 @@ The workflow sketch and the Nexus cleanup configuration are in the proposal, §8
 - **Tags and releases created with `GITHUB_TOKEN` do not trigger other workflows.** That is why build and deploy run in `release.yml` with `needs:` instead of listening to `release` events.
 - **Rulesets on a private repo of a free User account return HTTP 403** ("Upgrade to GitHub Pro or make this repository public"). The setup script prints the error and continues; without rulesets nothing enforces PRs, squash only or required checks, so the use cases still run but direct pushes are possible.
 - **The first release is always 1.0.0.** With no tag matching `tagFormat` (`X.Y.Z`), semantic-release starts at 1.0.0 whatever the first bump is.
-- **Guard failed.** Someone edited the merge subject or pushed directly. No tag is created; fix forward with a correctly titled PR (use case 10).
+- **Guard failed.** Someone edited the merge subject, added a body in the merge dialog, or pushed directly. GitHub's own `Co-authored-by` / `Signed-off-by` trailers are accepted (`scripts/check-commit-message.sh`, tested in `tests/run.sh`). No tag is created; fix forward with a correctly titled PR (use case 10).
 - **`pr-title` fails on a hotfix PR.** Only `fix`, `perf` and `revert` without `!` are accepted on `hotfix/**` (use case 12).
 - **`hotfix-release` fails with "Tag ... already exists".** The tag is never overwritten. Check the tags of the line and re-run the job after the cause is fixed.
 - **`hotfix-start` fails with "Tag X.Y.Z does not exist" or a `hotfix-version:` error.** `base_tag` must be an existing `X.Y.Z` or `X.Y.Z-hotfix.N` tag.

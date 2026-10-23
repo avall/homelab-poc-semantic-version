@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0          # all tags and history
-      - name: Guard - commit message must equal its PR title
+      - name: Guard - commit subject must equal its PR title, body only trailers
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BEFORE: ${{ github.event.before }}
@@ -33,8 +33,9 @@ jobs:
             pr=$(gh api "repos/$REPO/commits/$sha/pulls" --jq '.[0] | "\(.number)\t\(.title)"')
             [ -n "$pr" ] || { echo "::error::$sha has no PR"; exit 1; }
             expected="$(cut -f2- <<<"$pr") (#$(cut -f1 <<<"$pr"))"
-            actual=$(git log -1 --format=%B "$sha")
-            [ "$actual" = "$expected" ] || { echo "::error::$sha message differs from its PR title. Expected: $expected"; exit 1; }
+            # GitHub appends Co-authored-by / Signed-off-by trailers even with a BLANK squash message
+            reason=$(git log -1 --format=%B "$sha" | scripts/check-commit-message.sh "$expected") \
+              || { echo "::error::$sha $reason"; exit 1; }
             echo "OK $sha: $expected"
           done
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
