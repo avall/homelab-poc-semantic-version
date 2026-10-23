@@ -27,8 +27,8 @@ jobs:
             chore
             style
           # Jira key first in the description
-          subjectPattern: ^CK-\d+ .+$
-          subjectPatternError: 'Use "<type>: CK-1234 <description>", e.g. "fix: CK-11533 handle null carrier id".'
+          subjectPattern: ^CK-\d+[ -].+$
+          subjectPatternError: 'Use "<type>: CK-1234 <description>" or "<type>: CK-1234-<description>", e.g. "fix: CK-11533 handle null carrier id".'
       # Dependabot titles are "<prefix>: Bump X from A to B" with no Jira key; the author cannot be spoofed, a label can.
       - name: Dependabot title (build or fix, scope deps)
         if: github.event.pull_request.user.login == 'dependabot[bot]'
