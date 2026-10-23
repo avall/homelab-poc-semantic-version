@@ -113,22 +113,20 @@ JSON
 )"
 }
 
-# Bypass: actor 15368 is the GitHub Actions app (GITHUB_TOKEN), role 5 is repository admin.
-# Limitation: the admin bypass also lets a human admin push tags; only an org-owned GitHub App token would be stricter.
+# No "creation" rule: GitHub Actions (GITHUB_TOKEN) cannot be a bypass actor, so it would block the release workflows.
+# A manual tag that collides with a calculated version makes the release fail; it never overwrites. Role 5 is repository admin.
 tag_ruleset() {
-  info "Tag ruleset (X.Y.Z and X.Y.Z-hotfix.N tags only created by the release workflows)"
+  info "Tag ruleset (X.Y.Z and X.Y.Z-hotfix.N tags cannot be moved or deleted)"
   upsert_ruleset "release-tags" "$(cat <<'JSON'
 {
   "name": "release-tags",
   "target": "tag",
   "enforcement": "active",
   "bypass_actors": [
-    { "actor_id": 15368, "actor_type": "Integration", "bypass_mode": "always" },
     { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }
   ],
   "conditions": { "ref_name": { "include": ["refs/tags/*.*.*"], "exclude": [] } },
   "rules": [
-    { "type": "creation" },
     { "type": "update", "parameters": { "update_allows_fetch_and_merge": false } },
     { "type": "deletion" }
   ]
