@@ -19,6 +19,6 @@ class HelloControllerTest {
         assertThat(mvc.get().uri("/hello"))
                 .hasStatusOk()
                 .hasContentTypeCompatibleWith(MediaType.TEXT_PLAIN)
-                .hasBodyTextEqualTo("helloworld");
+                .hasBodyTextEqualTo("helloworld big change");
     }
 }
