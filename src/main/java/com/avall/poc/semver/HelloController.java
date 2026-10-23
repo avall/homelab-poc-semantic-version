@@ -9,6 +9,6 @@ class HelloController {
 
     @GetMapping(value = "/hello", produces = MediaType.TEXT_PLAIN_VALUE)
     String hello() {
-        return "helloworld";
+        return "helloworld big change";
     }
 }
