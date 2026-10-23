@@ -1,0 +1,4 @@
+# Maven wrapper scripts are stored exactly as the wrapper and Dependabot write them:
+# mvnw with LF (CRLF breaks /bin/sh), mvnw.cmd with CRLF and no conversion, so Dependabot diffs show only real changes.
+mvnw      text eol=lf
+mvnw.cmd  -text

@@ -1,14 +1,16 @@
 name: pr-title
 on:
   pull_request_target:            # config read from the base branch; the PR is never checked out
-    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+    types: [opened, edited, reopened, synchronize]
 permissions:
   pull-requests: read
 jobs:
   pr-title:                       # check name "pr-title" is required by the branch ruleset
     runs-on: ubuntu-latest
     steps:
-      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+      - name: Conventional title with Jira key (people)
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -27,9 +29,19 @@ jobs:
           # Jira key first in the description
           subjectPattern: ^CK-\d+ .+$
           subjectPatternError: 'Use "<type>: CK-1234 <description>", e.g. "fix: CK-11533 handle null carrier id".'
-          # Dependabot PRs: title prefix set by dependabot.yml, no Jira key
-          ignoreLabels: |
-            dependencies
+      # Dependabot titles are "<prefix>: Bump X from A to B" with no Jira key; the author cannot be spoofed, a label can.
+      - name: Dependabot title (build or fix, scope deps)
+        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          re='^(build|fix)\(deps(-dev)?\): [Bb]ump '
+          if [[ "$TITLE" =~ $re ]]; then
+            echo "OK Dependabot: $TITLE"
+          else
+            echo "::error::Dependabot titles must start with build(deps): or fix(deps): (see dependabot.yml). Got: $TITLE"
+            exit 1
+          fi
       - name: Hotfix lines accept only fix, perf and revert
         env:
           TITLE: ${{ github.event.pull_request.title }}
