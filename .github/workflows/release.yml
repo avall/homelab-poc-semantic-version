@@ -1,0 +1,95 @@
+name: release
+on:
+  push:
+    branches:
+      - master                    # hotfix lines release with hotfix-release.yml
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write             # tag + GitHub Release
+      pull-requests: read         # guard: find the PR of each commit
+    outputs:
+      published: ${{ steps.sr.outputs.new_release_published }}
+      version: ${{ steps.sr.outputs.new_release_version }}
+      tag: ${{ steps.sr.outputs.new_release_git_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0          # all tags and history
+      - name: Guard - commit message must equal its PR title
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          for sha in $(git rev-list "$BEFORE..$AFTER"); do
+            pr=$(gh api "repos/$REPO/commits/$sha/pulls" --jq '.[0] | "\(.number)\t\(.title)"')
+            [ -n "$pr" ] || { echo "::error::$sha has no PR"; exit 1; }
+            expected="$(cut -f2- <<<"$pr") (#$(cut -f1 <<<"$pr"))"
+            actual=$(git log -1 --format=%B "$sha")
+            [ "$actual" = "$expected" ] || { echo "::error::$sha message differs from its PR title. Expected: $expected"; exit 1; }
+            echo "OK $sha: $expected"
+          done
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - id: sr
+        uses: cycjimmy/semantic-release-action@d9bf53a078bd2f86aaffaec796dbb3d28f1b6f34 # v8.1.3
+        with:
+          semantic_version: 25.0.9
+          extra_plugins: conventional-changelog-conventionalcommits@10.4.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Summary
+        env:
+          PUBLISHED: ${{ steps.sr.outputs.new_release_published }}
+          VERSION: ${{ steps.sr.outputs.new_release_version }}
+        run: |
+          if [ "$PUBLISHED" = "true" ]; then msg="Released $VERSION"; else msg="No release: no releasable commit since the last tag"; fi
+          echo "$msg"
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - name: Stamp version and build
+        run: |
+          ./mvnw -B versions:set -DnewVersion="$VERSION" -DgenerateBackupPoms=false
+          ./mvnw -B verify
+      - name: Container image names (no docker build in the POC)
+        run: |
+          for image in "ghcr.io/avall/homelab-poc-semantic-version:$VERSION-oci" "ghcr.io/avall/homelab-poc-semantic-version:$VERSION"; do
+            echo "IMAGE $image"
+            echo "IMAGE \`$image\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+  deploy:
+    needs: [release, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.release.outputs.version }}
+    steps:
+      - name: Deployment (simulated)
+        run: |
+          msg="DEPLOYMENT OF VERSION $VERSION completed in the infra"
+          echo "$msg"
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"

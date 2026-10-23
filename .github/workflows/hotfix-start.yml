@@ -1,0 +1,42 @@
+name: hotfix-start
+on:
+  workflow_dispatch:
+    inputs:
+      base_tag:                   # workflow_dispatch cannot list tags: the script validates the value
+        description: 'Production tag to fix: X.Y.Z or X.Y.Z-hotfix.N'
+        required: true
+        type: string
+permissions:
+  contents: write                 # create the hotfix line branch
+jobs:
+  hotfix-start:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0          # all tags
+      - name: Create or reuse the hotfix line
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BASE_TAG: ${{ inputs.base_tag }}
+        run: |
+          base=$(scripts/hotfix-version.sh line "$BASE_TAG")
+          git rev-parse --verify --quiet "refs/tags/$base" >/dev/null || { echo "::error::Tag $base does not exist"; exit 1; }
+          line="hotfix/$base"
+          if git ls-remote --exit-code --heads origin "refs/heads/$line" >/dev/null; then
+            state="Reused existing line $line"
+          else
+            sha=$(git rev-parse "$base^{commit}")
+            gh api "repos/$REPO/git/refs" -f ref="refs/heads/$line" -f sha="$sha" >/dev/null
+            state="Created line $line at $sha (tag $base)"
+          fi
+          next=$(git tag -l | scripts/hotfix-version.sh next "$base")
+          tee -a "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Hotfix line $line
+
+          - $state
+          - Next version on merge: \`$next\`
+          - Branch \`CK-1234-description\` from \`$line\`, open a PR into \`$line\` titled \`fix: CK-1234 ...\` (only \`fix\`, \`perf\` or \`revert\`).
+          - Port the fix to \`master\` with a cherry-pick PR. Never merge \`$line\` into \`master\`.
+          EOF
