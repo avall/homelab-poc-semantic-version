@@ -23,7 +23,7 @@ PR title format (validated by the `pr-title` check):
 
 - Only the title counts: the squash body is blank, so a `BREAKING CHANGE:` footer in the PR description has no effect. `!` is the only breaking signal.
 - The highest bump wins when one release contains several PRs.
-- The Jira key goes first in the description (`subjectPattern: ^CK-\d+ .+$`). PRs labelled `dependencies` (Dependabot) skip the check.
+- The Jira key goes first in the description (`subjectPattern: ^CK-\d+ .+$`). PRs opened by `dependabot[bot]` are checked against `^(build|fix)\(deps(-dev)?\): Bump ` instead: Dependabot cannot add a Jira key, and its author cannot be spoofed (a label could be added by anyone with write access).
 - Only `master` releases with semantic-release. Hotfixes for an older production version go to a hotfix line `hotfix/X.Y.Z` and release `X.Y.(Z+1)-hotfix.N` (see [Hotfixes](#hotfixes)).
 
 ## Architecture
