@@ -1,5 +1,7 @@
 # homelab-poc-semantic-version
 
+[![Latest release](https://img.shields.io/github/v/release/avall/homelab-poc-semantic-version?sort=semver&label=latest%20release)](https://github.com/avall/homelab-poc-semantic-version/releases/latest)
+
 POC of automated releases driven by **PR titles** with [semantic-release](https://semantic-release.org/), following the proposal *Automated Releases from PR Titles with semantic-release* (`plan/semantic-version/release-automation-proposal.md`).
 
 A Spring Boot 4 service (`GET /hello` returns `helloworld`) releases itself: the PR title decides MAJOR / MINOR / PATCH, a squash merge copies it into the only commit on `master`, a guard checks it, and semantic-release creates the tag and the GitHub Release. Maven gets the version at build time; nothing is committed back (`pom.xml` stays at `0.0.0-SNAPSHOT`).
@@ -205,6 +207,22 @@ If the default branch is renamed after cloning, update local clones:
 ```bash
 git branch -m main master && git fetch origin && git branch -u origin/master master && git remote set-head origin -a
 ```
+
+## Version of a running service
+
+The pom stays at `0.0.0-SNAPSHOT`, so the real version is in the artifact, not in git. `GET /actuator/info` returns it:
+
+```json
+{
+  "git": { "branch": "CK-11488-breaking-change", "commit": { "id": "2e0503c", "time": "2026-10-23T14:26:30Z" } },
+  "build": { "artifact": "homelab-poc-semantic-version", "group": "com.avall.poc", "name": "homelab-poc-semantic-version", "version": "2.0.0" }
+}
+```
+
+- `build.*` comes from `META-INF/build-info.properties` (goal `build-info` of `spring-boot-maven-plugin`). `build.version` is the version CI stamps with `versions:set`: `X.Y.Z` on a release, `X.Y.(Z+1)-hotfix.N` on a hotfix, `0.0.0-CK-1234-SNAPSHOT` on a PR, `0.0.0-SNAPSHOT` locally.
+- `git.*` comes from `git.properties` (`git-commit-id-maven-plugin`): branch, abbreviated commit id and commit time.
+- Only `health` and `info` are exposed over HTTP (`application.properties`).
+- The badge at the top shows the latest GitHub Release (shields.io reads the public GitHub API, so it only works on public repositories). It is the latest release, not necessarily the version in production.
 
 ## Build and run locally
 
