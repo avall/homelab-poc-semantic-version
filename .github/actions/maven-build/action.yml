@@ -47,13 +47,18 @@ runs:
         ./mvnw -B -ntp versions:set -DnewVersion="$VERSION" -DgenerateBackupPoms=false -DprocessAllModules=true
         git --no-pager diff -- '**/pom.xml' pom.xml
 
-    - name: Build and deploy to Nexus
+    - name: Build and deploy to Nexus (printed unless goal is deploy)
       shell: bash
       env:
         GOAL: ${{ inputs.goal }}
         VERSION: ${{ inputs.version }}
         REPOSITORY: ${{ inputs.deploy-repository }}
       run: |
+        if [[ "$GOAL" != deploy ]]; then
+          ./mvnw -B -ntp clean "$GOAL"
+          echo "Nexus deploy printed only: ./mvnw -B -ntp -s <settings> clean deploy (version $VERSION -> $REPOSITORY)"
+          exit 0
+        fi
         if [[ -z "${NEXUS_SETTINGS:-}" ]]; then
           echo "::error::NEXUS_SETTINGS is not set: run .github/scripts/nexus-up.sh before this action"
           exit 1

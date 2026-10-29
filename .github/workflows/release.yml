@@ -51,18 +51,21 @@ jobs:
             exit 1
           fi
 
-      - name: Start Nexus (docker compose)
-        if: steps.version.outputs.published == 'true'
-        env:
-          # Accepts the Sonatype Nexus Community Edition EULA: https://links.sonatype.com/products/nxrm/ce-eula
-          NEXUS_ACCEPT_EULA: 'true'
-        run: .github/scripts/nexus-up.sh
+      # Nexus deploy disabled: the Nexus started by docker compose does not work yet. To enable it, uncomment this
+      # step and remove `goal: install` below.
+      # - name: Start Nexus (docker compose)
+      #   if: steps.version.outputs.published == 'true'
+      #   env:
+      #     # Accepts the Sonatype Nexus Community Edition EULA: https://links.sonatype.com/products/nxrm/ce-eula
+      #     NEXUS_ACCEPT_EULA: 'true'
+      #   run: .github/scripts/nexus-up.sh
 
-      - name: Build, test and deploy release to Nexus
+      - name: Build and test release (Nexus deploy printed)
         if: steps.version.outputs.published == 'true'
         uses: ./.github/actions/maven-build
         with:
           version: ${{ steps.version.outputs.version }}
+          goal: install
           deploy-repository: maven-releases
 
       - name: Build docker images (push printed)

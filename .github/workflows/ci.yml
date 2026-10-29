@@ -53,17 +53,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Start Nexus (docker compose)
-        env:
-          # Accepts the Sonatype Nexus Community Edition EULA: https://links.sonatype.com/products/nxrm/ce-eula
-          NEXUS_ACCEPT_EULA: 'true'
-        run: .github/scripts/nexus-up.sh
+      # Nexus deploy disabled: the Nexus started by docker compose does not work yet. To enable it, uncomment this
+      # step and remove `goal: install` below.
+      # - name: Start Nexus (docker compose)
+      #   env:
+      #     # Accepts the Sonatype Nexus Community Edition EULA: https://links.sonatype.com/products/nxrm/ce-eula
+      #     NEXUS_ACCEPT_EULA: 'true'
+      #   run: .github/scripts/nexus-up.sh
 
-      # `mvn clean deploy` runs unit (surefire) and integration (failsafe) tests, then deploys the snapshot
-      - name: Build, test and deploy snapshot to Nexus
+      # `mvn clean install` runs unit (surefire) and integration (failsafe) tests; the Nexus deploy is printed only
+      - name: Build and test snapshot (Nexus deploy printed)
         uses: ./.github/actions/maven-build
         with:
           version: ${{ needs.snapshot-version.outputs.snapshot_version }}
+          goal: install
           deploy-repository: maven-snapshots
 
       - name: Upload test reports
