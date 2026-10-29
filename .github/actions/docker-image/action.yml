@@ -1,0 +1,69 @@
+name: Docker image
+description: >
+  Builds the hello-service image once with docker/Dockerfile and prints the pushes: `<version>-oci` (OCI manifest)
+  and `<version>` (Docker v2 manifest), plus `latest` for regular releases. No registry login, nothing is pushed.
+
+inputs:
+  version:
+    description: Image tag
+    required: true
+  service:
+    description: Image name
+    required: false
+    default: avall/homelab-poc-semantic-version
+  registry:
+    description: Docker registry
+    required: false
+    default: ghcr.io
+  working-directory:
+    description: Build context containing docker/Dockerfile and hello-service/target
+    required: false
+    default: .
+  latest:
+    description: Also push the `latest` tag
+    required: false
+    default: 'false'
+  latest-skip-reason:
+    description: Reason printed when the latest tag is skipped
+    required: false
+    default: hotfix release
+
+runs:
+  using: composite
+  steps:
+    - name: Build docker image
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.registry }}/${{ inputs.service }}
+        VERSION: ${{ inputs.version }}
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+      run: |
+        docker build -f "$WORKING_DIRECTORY/docker/Dockerfile" -t "$IMAGE:$VERSION" "$WORKING_DIRECTORY"
+        docker image ls "$IMAGE"
+
+    - name: Push docker image (dry run)
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.registry }}/${{ inputs.service }}
+        VERSION: ${{ inputs.version }}
+        LATEST: ${{ inputs.latest }}
+        SKIP_REASON: ${{ inputs.latest-skip-reason }}
+      run: |
+        tags=("$IMAGE:$VERSION-oci" "$IMAGE:$VERSION")
+        if [[ "$LATEST" == "true" ]]; then
+          tags+=("$IMAGE:latest")
+        fi
+        for tag in "${tags[@]}"; do
+          echo "[dry-run] would push $tag"
+        done
+        if [[ "$LATEST" != "true" ]]; then
+          echo "skip latest tag: $SKIP_REASON"
+        fi
+        {
+          echo "### Docker image"
+          echo "| Item | Value |"
+          echo "| --- | --- |"
+          for tag in "${tags[@]}"; do
+            echo "| Tag | \`$tag\` (not pushed) |"
+          done
+        } >> "$GITHUB_STEP_SUMMARY"

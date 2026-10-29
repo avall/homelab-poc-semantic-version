@@ -1,340 +1,406 @@
 # homelab-poc-semantic-version
 
-POC of automated releases driven by **PR titles** with [semantic-release](https://semantic-release.org/), following the proposal *Automated Releases from PR Titles with semantic-release* (`plan/semantic-version/release-automation-proposal.md`).
+POC of a release flow on a two-module Java 25 / Spring Boot 4 hello world: **the version is a consequence of what
+is merged**. [semantic-release](https://semantic-release.gitbook.io/) calculates it from
+[Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). Git tags, GitHub Releases, the release
+commit of the `pom.xml` files and the Maven deploy to a Nexus started with docker compose are real; docker pushes
+are printed as `[dry-run]` lines.
 
-A Spring Boot 4 service (`GET /hello` returns `helloworld`) releases itself: the PR title decides MAJOR / MINOR / PATCH, a squash merge copies it into the only commit on `master`, a guard checks it, and semantic-release creates the tag and the GitHub Release. Maven gets the version at build time; nothing is committed back (`pom.xml` stays at `0.0.0-SNAPSHOT`).
+| Module | Packaging | Content |
+| --- | --- | --- |
+| `homelab-poc-semantic-version` (root) | `pom` | parent and aggregator: version, `distributionManagement` |
+| `hello-lib` | `jar` | `GreetingService`, plain Java |
+| `hello-service` | Spring Boot `jar` | `GET /hello` returns `helloworld`, `/actuator/info`, OpenAPI; docker image |
 
-## Rules
+The flow mirrors [cnr-semantic-release-poc](https://github.com/cinarra/cnr-semantic-release-poc) (same `.github`
+layout, workflows, scripts and conventions); only names, modules, runners and the real Nexus deploy differ.
 
-PR title format (validated by the `pr-title` check):
+## Scenario
 
-```
-<type>[(scope)][!]: CK-1234 <description>
-```
+Tags `1.0.0` and `2.0.0` were released by an earlier design of this repository. The scenario below is the plan for
+the first runs of this design; the evidence (PRs, runs, releases) goes to [`.github/e2e/`](.github/e2e/) as the
+steps are executed.
 
-| Type | Use it when the PR... | Bump | Example |
-|---|---|---|---|
-| `fix` | corrects a bug, no contract change | PATCH | `fix(auth): CK-1234 refresh expired JWT` |
-| `perf` | same result, faster | PATCH | `perf(orders): CK-1234 add index on customer_id` |
-| `revert` | undoes a previous change | PATCH | `revert: CK-1234 restore 30s timeout` |
-| `feat` | adds a capability clients can ignore | MINOR | `feat(reports): CK-1234 add CSV export` |
-| any type + `!` | breaks clients | MAJOR | `feat(api)!: CK-1234 remove /v1/orders` |
-| `docs`, `test`, `refactor`, `build`, `ci`, `chore`, `style` | no runtime change | none | `refactor: CK-1234 extract TaxService` |
-
-- Only the title counts: the squash body is blank, so a `BREAKING CHANGE:` footer in the PR description has no effect. `!` is the only breaking signal.
-- The highest bump wins when one release contains several PRs.
-- The Jira key goes first in the description, followed by a space or a hyphen (`subjectPattern: ^CK-\d+[ -].+$`): `feat: CK-1234 add x` and `feat: CK-1234-add-x` are both valid. This is a project convention; Conventional Commits itself says nothing about ticket keys. PRs opened by `dependabot[bot]` are checked against `^(build|fix)\(deps(-dev)?\): Bump ` instead: Dependabot cannot add a Jira key, and its author cannot be spoofed (a label could be added by anyone with write access).
-- Only `master` releases with semantic-release. Hotfixes for an older production version go to a hotfix line `hotfix/X.Y.Z` and release `X.Y.(Z+1)-hotfix.N` (see [Hotfixes](#hotfixes)).
-
-## Architecture
+**Scenario:** production runs **`2.0.1`**, while `master` already moved to `2.1.0` and `3.0.0`. A production bug
+must be fixed on `2.0.1` **without** shipping the unvalidated changes of `2.1.0` or `3.0.0`, so the hotfix branch
+is cut from tag `2.0.1`. `rel X` stands for the `chore(release): X [skip ci]` commit of the `pom.xml` files.
 
 ```mermaid
-flowchart TD
-    subgraph PR["Before merge (pull request)"]
-        T["PR title<br/>type: CK-1234 description"] --> C{"pr-title + build<br/>required checks"}
-        C -->|fail| T
-        C -->|pass| S["Squash merge<br/>message = PR title (#N)"]
-    end
-    subgraph REL["release.yml on push to master"]
-        S --> G{"Guard: commit message<br/>== PR title?"}
-        G -->|no| X["Fail, no tag<br/>fix forward"]
-        G -->|yes| SR["semantic-release<br/>commits since last tag"]
-        SR -->|"no fix/perf/revert/feat/!"| N["No release"]
-        SR -->|bump| K["Tag X.Y.Z + GitHub Release"]
-        K --> B["build: versions:set X.Y.Z<br/>mvnw verify"]
-        B --> I["Image names printed<br/>X.Y.Z-oci and X.Y.Z"]
-        I --> D["Deploy (simulated)"]
-    end
-```
-
-## Hotfixes
-
-**Scenario.** Production runs `1.0.0`. `master` already released `1.0.1`, `1.0.2` and `2.0.0`, and has unreleased commits. A bug on `1.0.0` must be fixed from tag `1.0.0` without shipping any later change. SemVer has no free number between `1.0.0` and `1.0.1` except a pre-release of `1.0.1`, so the hotfix is `1.0.1-hotfix.N`.
-
-| What | Name | Example |
-|---|---|---|
-| Hotfix line (long-lived branch, created from the production tag) | `hotfix/<production tag>` | `hotfix/1.0.0` |
-| Work branch (one per fix, PR into the line) | `CK-1234-description` | `CK-1234-null-greeting` |
-| Hotfix versions (tags and GitHub Releases) | `X.Y.(Z+1)-hotfix.N` | `1.0.1-hotfix.1`, `1.0.1-hotfix.2` |
-
-Flow:
-
-1. Run the `hotfix-start` workflow (Actions > hotfix-start > Run workflow) with `base_tag` set to the production version: `1.0.0`, or a hotfix already in production such as `1.0.1-hotfix.2` (both map to `hotfix/1.0.0`). It validates the tag, creates `hotfix/1.0.0` at the tag commit or reuses it, and prints the next version.
-2. Branch `CK-1234-description` from `hotfix/1.0.0` and open a PR into `hotfix/1.0.0` titled `fix: CK-1234 ...`.
-3. Squash merge. `hotfix-release` computes `1.0.1-hotfix.N` (`scripts/hotfix-version.sh`), stamps it with `versions:set`, runs `./mvnw verify`, prints the image names and creates the tag and the GitHub Release.
-4. Port the fix to `master` with a cherry-pick PR `fix: CK-1234 ...`. The next deployment is the `master` release that contains the port.
-
-```mermaid
-%%{init: {"gitGraph": {"mainBranchName": "master", "rotateCommitLabel": false}}}%%
+%%{init: {'gitGraph': {'mainBranchName': 'master', 'rotateCommitLabel': false}}}%%
 gitGraph
-    commit id: "CK-9001" tag: "1.0.0"
-    branch "hotfix/1.0.0"
-    checkout master
-    commit id: "CK-9002" tag: "1.0.1"
-    commit id: "CK-9003" tag: "1.0.2"
-    commit id: "CK-9007" tag: "2.0.0"
-    commit id: "CK-1300"
-    checkout "hotfix/1.0.0"
-    branch CK-1234-null-greeting
-    commit id: "fix: CK-1234"
-    checkout "hotfix/1.0.0"
-    merge CK-1234-null-greeting id: "squash CK-1234" tag: "1.0.1-hotfix.1"
-    checkout master
-    commit id: "CK-1234 port" tag: "2.1.0"
+  commit id: "CK-11488 !" tag: "2.0.0"
+  commit id: "ci design"
+  commit id: "fix CK-1"
+  commit id: "prod" tag: "2.0.1"
+  branch hotfix/2.0.1
+  checkout master
+  commit id: "feat CK-2"
+  commit id: "rel 2.1.0" tag: "2.1.0"
+  commit id: "feat! CK-3"
+  commit id: "rel 3.0.0" tag: "3.0.0"
+  checkout hotfix/2.0.1
+  commit id: "fix CK-4"
+  commit id: "rel hotfix" tag: "2.0.2-hotfix.1"
+  checkout master
+  commit id: "fix CK-5"
+  commit id: "rel 3.0.1" tag: "3.0.1 (Latest)"
 ```
 
-Two hotfixes at the same time on one line:
+| Step | What | Result |
+| --- | --- | --- |
+| 1 | PR `fix(CK-1)` | `2.0.1` (patch), the version **in production** |
+| 2 | PR `feat(CK-2)` | `2.1.0` (minor) |
+| 3 | PR `feat(CK-3)!` | `3.0.0` (major) |
+| 4 | PR `docs(CK-6)` | no release |
+| 5 | hotfix PR `hotfix/2.0.1` → `master`, **kept open** | snapshot `3.0.1-hotfix-2.0.1-SNAPSHOT` |
+| 6 | Run workflow **Release** on `hotfix/2.0.1` (`dry_run`, then real) | `2.0.2-hotfix.1`, Pre-release; Latest unchanged |
+| 7 | PR `fix(CK-5)` | `3.0.1` (Latest) + `chore(release): 3.0.1` commit of the `pom.xml` files |
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor A as Developer A
-    actor B as Developer B
-    participant L as hotfix/1.0.0
-    participant HR as hotfix-release (one run per line)
-    participant GH as Tags and GitHub Releases
+Where to look: [releases](https://github.com/avall/homelab-poc-semantic-version/releases) (Latest vs Pre-release),
+the run **summary** (versions, artifacts deployed to Nexus, docker tags), and the logs (`versions:set` diff, Nexus
+search, `[dry-run]` push lines).
 
-    A->>L: PR "fix: CK-1234 ..." (pr-title + build pass)
-    B->>L: PR "fix: CK-1235 ..." (pr-title + build pass)
-    A->>L: squash merge
-    L->>HR: PR closed and merged (run 1)
-    B->>L: squash merge
-    L->>HR: PR closed and merged (run 2 waits for run 1)
-    HR->>GH: 1.0.1-hotfix.1 (CK-1234)
-    HR->>GH: 1.0.1-hotfix.2 (CK-1234 + CK-1235)
-    Note over GH: Deploy 1.0.1-hotfix.2: it contains both fixes
-```
-
-Rules:
-
-- Only `fix`, `perf` and `revert` titles, without `!`, are accepted on `hotfix/**` (`pr-title` check, re-checked by `hotfix-release`).
-- A hotfix is released when a PR is merged into the line, not on every push. Direct pushes are blocked by the branch ruleset.
-- Hotfixes are cumulative: `1.0.1-hotfix.2` contains `1.0.1-hotfix.1`. N is the highest existing N of the line plus one.
-- Hotfix lines are never deleted (ruleset `deletion` rule) while that version runs in production.
-- Port every fix to `master` by cherry-pick. Never merge a hotfix line into `master`.
-- After a hotfix, the next deployment is a `master` version that contains the port, never `1.0.1` or `1.0.2`: they were released before the fix and do not contain it.
-
-Known caveats:
-
-- SemVer orders `1.0.1-hotfix.N < 1.0.1`, although `1.0.1` does not contain the fix. Do not use version ranges to pick hotfixes.
-- Maven orders `1.0.1-hotfix.10 > 1.0.1` (an unknown qualifier sorts after the release). Hotfix versions are for services, not for shared libraries that other builds resolve by range.
-- The GitHub Release of a hotfix is not marked Pre-release and not Latest (`--latest=false`), so Latest stays on the `master` line.
-- `hotfix-release` uses `pull_request_target`: since 2025-12-08 the workflow file always comes from the default branch, so lines cut from tags older than this workflow still release. `scripts/hotfix-version.sh` is taken from the default branch too; only the build (`mvnw`, sources) comes from the merged commit.
-- GitHub keeps at most one pending run per concurrency group. If three PRs merge into one line before the first release finishes, the middle run is cancelled; the third release is cumulative and still contains its fix.
-
-## Repository layout
-
-| Path | Purpose |
-|---|---|
-| `src/` | Spring Boot app (`com.avall.poc.semver`) and its test |
-| `pom.xml`, `mvnw`, `.mvn/` | Maven build (Java 25, Spring Boot 4.1.1, Maven 3.9.11 wrapper) |
-| `.github/workflows/ci.yml` | `build` check on every PR |
-| `.github/workflows/pr-title.yml` | `pr-title` check (amannn/action-semantic-pull-request) |
-| `.github/workflows/release.yml` | guard, semantic-release, build, image names and simulated deploy (`master` only) |
-| `.github/workflows/hotfix-start.yml` | manual: create or reuse the hotfix line `hotfix/<tag>` and print the next version |
-| `.github/workflows/hotfix-release.yml` | on merge into `hotfix/**`: tag and GitHub Release `X.Y.(Z+1)-hotfix.N` |
-| `.github/workflows/snapshot.yml` | simulated `0.0.0-CK-XXXX-SNAPSHOT` deploy on every PR push, and delete on close |
-| `.releaserc.json` | branches (`master` only), `tagFormat: ${version}`, `conventionalcommits` preset |
-| `.github/dependabot.yml` | Maven and Actions updates titled `build(deps): ...` |
-| `.github/pull_request_template.md` | title reminder and "Breaking change?" checkbox |
-| `scripts/setup-github.sh` | one-time repository settings and rulesets |
-| `scripts/hotfix-version.sh`, `scripts/snapshot-version.sh` | hotfix line and version, snapshot version (no network) |
-| `tests/run.sh` | table-driven tests of both scripts, run by the `build` check |
-| `use-cases/` | scripts that run each scenario on GitHub ([index](use-cases/README.md)) |
-
-## Prerequisites
-
-- JDK 25 (the wrapper downloads Maven 3.9.11)
-- `gh` authenticated with `repo` scope, `jq`, `git`
-- `gh stack` extension for use case 08
-
-## Repository setup (precondition)
-
-The release flow only works when the repository settings and rulesets are in place. This is a **precondition for this POC and for every repository** that adopts the flow: without the rulesets, an invalid PR title can be merged, a hotfix line can be deleted or pushed to directly, and anyone can create a tag that collides with a calculated version.
-
-**Order matters.** The required checks `build` and `pr-title` only exist once their workflows are on the default branch. `pr-title` runs on `pull_request_target`, which always takes the workflow from the default branch. So:
-
-1. **Bootstrap the code** with a direct push to the default branch, *before* any ruleset, with `[skip ci]` so the release guard does not fail on a commit without a PR. Example: `ci: CK-1234 bootstrap release automation [skip ci]`.
-2. **Open a test PR** so that `build` and `pr-title` run once (the ruleset UI suggests checks that ran recently).
-3. **Apply the settings below**, in the UI or with the script.
-4. **Check the protection:** a PR titled `wip` must fail `pr-title` and its merge button must be blocked.
-
-### Settings in the GitHub UI
-
-| Where | Setting | Value |
-|---|---|---|
-| Settings › General › Default branch | Rename (pencil icon) | `master` |
-| Settings › General › Pull Requests | Allow merge commits | off |
-| | Allow squash merging | on, default message **Pull request title** (`PR_TITLE` + `BLANK`) |
-| | Allow rebase merging | off |
-| | Automatically delete head branches | on (deletes `CK-...` work branches; `hotfix/*` lines are protected by the ruleset) |
-| Settings › General › Releases | Enable release immutability | on |
-| Settings › Actions › General | Actions permissions | allow `actions/*`, `amannn/action-semantic-pull-request`, `cycjimmy/semantic-release-action` (or all actions) |
-| | Workflow permissions | read is enough: each workflow asks for `contents: write` itself |
-
-**Settings › Rules › Rulesets › New branch ruleset** `release-branches`:
-
-- Enforcement status: **Active**. Bypass list: empty.
-- Target branches: **Include default branch** and **Include by pattern** `hotfix/*`.
-- Rules:
-  - Restrict deletions.
-  - Block force pushes.
-  - Require a pull request before merging: required approvals `0`, allowed merge methods **Squash** only.
-  - Require status checks to pass: click **+ Add checks** and type `build` and `pr-title`. The UI accepts any text, so the names must match the job names exactly; a check that never reports blocks every PR. Enable **Require branches to be up to date before merging** and **Do not require status checks on creation** (`hotfix-start` creates `hotfix/<tag>` without a PR).
-
-**Settings › Rules › Rulesets › New tag ruleset** `release-tags`:
-
-- Enforcement status: **Active**. Bypass list: **Repository admin**.
-- Target tags: **Include by pattern** `*.*.*` (also matches `1.0.1-hotfix.1`).
-- Rules: **restrict updates** and **restrict deletions**. Do **not** enable *Restrict creations*: the bypass list never offers GitHub Actions (the `GITHUB_TOKEN` of the release workflows), so that rule would block every release. A manual tag that collides with a calculated version makes the release fail (semantic-release and `hotfix-release` never reuse an existing tag); it never overwrites one. To also restrict creations, add a GitHub App of your own to the bypass list and create the tags with its token (`actions/create-github-app-token`).
-
-The same settings by script (asks before every change, can be re-run):
-
-```bash
-scripts/setup-github.sh avall/homelab-poc-semantic-version
-```
-
-Rulesets on a private repository need GitHub Pro, Team or Enterprise; public repositories have them on every plan.
-
-### Avoiding the manual setup for each new repository
-
-Bootstrapping and configuring every repository by hand does not scale. The proposal (§6, "Precondition and automation") describes the fix: a template repository for the files, organization rulesets targeted by a custom property, required workflows from a central repository, and Terraform for the per-repository settings. A personal account has no organization rulesets: there, the template repository plus `scripts/setup-github.sh` is the shortest path.
-
-If the default branch is renamed after cloning, update local clones:
-
-```bash
-git branch -m main master && git fetch origin && git branch -u origin/master master && git remote set-head origin -a
-```
-
-## Build and run locally
-
-```bash
-bash tests/run.sh             # hotfix and snapshot version scripts
-./mvnw clean verify
-./mvnw spring-boot:run        # or: java -jar target/homelab-poc-semantic-version-0.0.0-SNAPSHOT.jar
-curl localhost:8080/hello     # helloworld
-```
-
-## Use cases
-
-Run the scripts in `use-cases/` in order on a fresh repository; each prints its plan and asks for confirmation (`--yes` skips it):
-
-```bash
-use-cases/01-first-release.sh
-```
-
-Expected tags in order: `1.0.0 1.0.1 1.0.2 1.1.0 2.0.0 2.1.0 2.1.1 2.1.2 1.0.1-hotfix.1 2.1.3 1.0.1-hotfix.2 1.0.1-hotfix.3`. See [use-cases/README.md](use-cases/README.md).
-
-## What is simulated
-
-- **Container image:** nothing is built. `release.yml` and `hotfix-release.yml` only print the image names `ghcr.io/avall/homelab-poc-semantic-version:X.Y.Z-oci` and `ghcr.io/avall/homelab-poc-semantic-version:X.Y.Z`.
-- **Deployment:** the `deploy` job only logs `DEPLOYMENT OF VERSION X.Y.Z completed in the infra`.
-- **Snapshots:** `snapshot.yml` prints the Nexus deploy and delete (see below).
-- These lines also go to the run summary. The Maven build is real: `versions:set` stamps the released version and `./mvnw verify` builds the jar (not published).
-
-## Snapshots for shared libraries
-
-Services often consume libraries built in other repositories. To test an unmerged library change from another repository, the consumer needs that jar in Nexus. A snapshot solves this, and only this: it is published for **library modules only** and never builds or pushes a Docker image.
-
-> **Status in this POC:** simulated by `.github/workflows/snapshot.yml`. This repository has a single service module, no library module and no Nexus. On every push to a PR from a `CK-XXXX-...` branch, the workflow stamps `0.0.0-CK-XXXX-SNAPSHOT` (`scripts/snapshot-version.sh`), runs `./mvnw verify` and prints `[simulated] mvn deploy -> Nexus snapshots: com.avall.poc:homelab-poc-semantic-version:0.0.0-CK-XXXX-SNAPSHOT` and `No Docker image for snapshots`. When the PR closes, it prints `[simulated] DELETE 0.0.0-CK-XXXX-SNAPSHOT from Nexus snapshots`. It is not a required check. The `pom.xml` stays at `0.0.0-SNAPSHOT`. Use case 15 runs it.
-
-### Rules for snapshots
-
-- **Format:** Nexus always receives `x.y.z-CK-XXXX-SNAPSHOT`, where `x.y.z` is the pom version and `CK-XXXX` is the Jira key of the branch (`CK-XXXX-short-description`). The pom stays at `0.0.0-SNAPSHOT`, so the published version is **`0.0.0-CK-XXXX-SNAPSHOT`**.
-- **No manual pom edit for the producer.** The developer never adds `CK-XXXX` to any pom. The PR workflow runs `versions:set` on the runner's temporary checkout, deploys, and discards the change. Nothing is committed. Today's PR workflow already does the same with the branch name (`Set version to github branch`).
-- **Published on every push** to the library PR, automatically, with no label.
-- **Deleted from Nexus when PR CK-XXXX closes.** On merge, `x.y.z` replaces it. When the PR is closed without merge, it is abandoned. Snapshots of other branches are not touched.
-- **Cleaned by Nexus** when not downloaded in the last **60 days**, as a safety net.
-- **Library modules only:** `deploy -pl <library modules> -am`. The `-am` flag also publishes the parent pom that consumers need to resolve the dependency. The service jar and the Docker image are not built here, and the PR image keeps its current trigger (`Ready for QA` label).
-
-| Who | Where | Version |
-|---|---|---|
-| Producer developer | Library `pom.xml`, in git | Always `0.0.0-SNAPSHOT` (never edited) |
-| Producer PR CI | Temporary checkout on the runner | `0.0.0-CK-XXXX-SNAPSHOT`, deployed to Nexus `snapshots`, then discarded |
-| Release CI (merge to `master`) | Temporary checkout on the runner | `x.y.z`, deployed to Nexus `releases`, then discarded |
-| Consumer developer | Microservice `pom.xml`, in git | Edited by hand: `0.0.0-CK-XXXX-SNAPSHOT` while testing, `x.y.z` before merge |
-
-| Decision | Agreed |
-|---|---|
-| When `0.0.0-CK-XXXX-SNAPSHOT` is published | On every push to the library PR, automatically, no label |
-| When `0.0.0-CK-XXXX-SNAPSHOT` is deleted | When PR CK-XXXX closes, by a `pull_request: closed` workflow that calls the Nexus API |
-
-| Mechanism | When | What it deletes | Why |
-|---|---|---|---|
-| `pull_request: closed` workflow in the library repository | PR CK-XXXX is merged, or closed without merge | Only `0.0.0-CK-XXXX-SNAPSHOT`, with a `DELETE` through the Nexus REST API | It is useless once `x.y.z` exists or the PR is abandoned |
-| Nexus cleanup policy on `snapshots` | Daily, run by Nexus | Any `*-SNAPSHOT` not downloaded in the last 60 days | Covers a failed workflow, lost branches, and old jars (611 snapshot poms date from 2019) |
-
-One pom in git, many jars in Nexus:
+## How releases work
 
 ```mermaid
 flowchart LR
-    P["Library pom.xml in git<br/>0.0.0-SNAPSHOT<br/>(same for everyone)"]
-    P -->|"push to PR CK-1111<br/>versions:set on runner"| A["0.0.0-CK-1111-SNAPSHOT"]
-    P -->|"push to PR CK-2222<br/>versions:set on runner"| B["0.0.0-CK-2222-SNAPSHOT"]
-    A -->|deploy library modules| NS[("Nexus snapshots")]
-    B -->|deploy library modules| NS
-    P -->|"merge to master<br/>semantic-release"| R["x.y.z"]
-    R -->|deploy| NR[("Nexus releases")]
-    R --> D["Docker image x.y.z-oci<br/>tag + GitHub Release x.y.z"]
-    R -.->|"no commit"| P
+  A["Commit<br/>type(CK-n): subject"] -->|commit-msg hook| B[PR into master]
+  B --> C{PR checks}
+  C -->|pr-title| D[convention OK]
+  C -->|snapshot-version, build| E["preview X.Y.Z<br/>deploy X.Y.Z-branch-SNAPSHOT"]
+  D --> F["Squash merge<br/>PR title = commit"]
+  E --> F
+  F --> G[Release workflow]
+  G --> H{release due?}
+  H -->|"no: docs, ci, chore"| I[nothing created]
+  H -->|yes| J["build + tests<br/>deploy to Nexus, print push"]
+  J --> K["commit pom.xml X.Y.Z<br/>tag + GitHub Release"]
 ```
 
-Life cycle of one snapshot:
+1. **Commit** `<type>(CK-<number>)[!]: <subject>`, enforced by a local hook and the `pr-title` check (only the PR title reaches `master`).
+2. **PR checks**: title convention, a preview of the version the PR will release, and a build that
+   deploys `<next>-<branch>-SNAPSHOT` to the Nexus of the job.
+3. **Squash merge**: the PR title is the commit that decides the bump.
+4. **Release** (one job): calculate version → build, test and deploy to Nexus → docker image → commit the
+   `pom.xml` files, tag, GitHub Release. The tag comes last, so a failed build never leaves one behind.
+
+| PR title type | Bump | Example |
+| --- | --- | --- |
+| `fix`, `perf`, `revert` | patch | `2.0.0` → `2.0.1` |
+| `feat` | minor | `2.0.1` → `2.1.0` |
+| `!` after the scope in the PR title (a `BREAKING CHANGE:` footer in the PR description is dropped by the blank squash body) | major | `2.1.0` → `3.0.0` |
+| `docs`, `ci`, `chore`, `test`, `build`, `refactor` | none | — |
+
+### POM version
+
+`versions:set` (the `versions-maven-plugin`, with `-DprocessAllModules=true`) updates the root `pom.xml` and the
+parent version of both modules:
+
+| When | `pom.xml` version | Committed | Nexus repository |
+| --- | --- | --- | --- |
+| PR build | `<next>-<branch>-SNAPSHOT` | no, CI workspace only | `maven-snapshots` |
+| Release from `master` | `X.Y.Z` | yes, `chore(release): X.Y.Z [skip ci]` | `maven-releases` |
+| Hotfix release | `X.Y.(Z+1)-hotfix.N` | yes, on the hotfix branch | `maven-releases` |
+| Local build | last release, as in git | — | only with `-s <settings> deploy` |
+
+The branch keeps parallel PRs apart (two PRs releasing `2.1.0` never overwrite each other). No `-SNAPSHOT` is
+ever committed. Never consume `LATEST`, `RELEASE`, version ranges or docker `latest` in production: Nexus
+`maven-metadata.xml` reflects the last **deployed** version and docker tags have no order. Pin exact versions;
+the git tags are the source of truth.
+
+### What changes in each case
+
+The tables start from the scenario above. Nexus holds the parent `homelab-poc-semantic-version` pom too; the
+image is `ghcr.io/avall/homelab-poc-semantic-version`, built from `hello-service` only; its pushes are printed,
+not executed. A PR build tags the image `<snapshot>` and `<snapshot>-oci`.
+
+**Patch** — PR `fix(CK-1): ...` from branch `CK-1-fix`, merged on `master` (last release `2.0.0`):
+
+| Item | Before | PR build | After the release |
+| --- | --- | --- | --- |
+| `pom.xml` in git (root, both modules) | `2.0.0` | `2.0.0` | `2.0.1` (`chore(release): 2.0.1 [skip ci]`) |
+| `pom.xml` in CI | — | `2.0.1-CK-1-fix-SNAPSHOT` | `2.0.1` |
+| Nexus `hello-lib`, `hello-service` | — | `maven-snapshots` `2.0.1-CK-1-fix-SNAPSHOT` | `maven-releases` `2.0.1` |
+| Image tags | — | `2.0.1-CK-1-fix-SNAPSHOT` | `2.0.1`, `2.0.1-oci`, `latest` |
+| Git tag / GitHub Release | `2.0.0` | — | `2.0.1`, Latest |
+
+**Minor** — PR `feat(CK-2): ...` from branch `CK-2-feat` (last release `2.0.1`):
+
+| Item | Before | PR build | After the release |
+| --- | --- | --- | --- |
+| `pom.xml` in git | `2.0.1` | `2.0.1` | `2.1.0` |
+| `pom.xml` in CI | — | `2.1.0-CK-2-feat-SNAPSHOT` | `2.1.0` |
+| Nexus `hello-lib`, `hello-service` | `maven-releases` `2.0.1` | `maven-snapshots` `2.1.0-CK-2-feat-SNAPSHOT` | `maven-releases` `2.1.0` |
+| Image tags | `2.0.1`, `latest` | `2.1.0-CK-2-feat-SNAPSHOT` | `2.1.0`, `2.1.0-oci`, `latest` |
+| Git tag / GitHub Release | `2.0.1` | — | `2.1.0`, Latest |
+
+**Major** — PR `feat(CK-3)!: ...` from branch `CK-3-break` (last release `2.1.0`):
+
+| Item | Before | PR build | After the release |
+| --- | --- | --- | --- |
+| `pom.xml` in git | `2.1.0` | `2.1.0` | `3.0.0` |
+| `pom.xml` in CI | — | `3.0.0-CK-3-break-SNAPSHOT` | `3.0.0` |
+| Nexus `hello-lib`, `hello-service` | `maven-releases` `2.1.0` | `maven-snapshots` `3.0.0-CK-3-break-SNAPSHOT` | `maven-releases` `3.0.0` |
+| Image tags | `2.1.0`, `latest` | `3.0.0-CK-3-break-SNAPSHOT` | `3.0.0`, `3.0.0-oci`, `latest` |
+| Git tag / GitHub Release | `2.1.0` | — | `3.0.0`, Latest |
+
+**PR without release** — PR `docs(CK-6): ...` from branch `CK-6-docs` (last release `3.0.0`): the build uses `3.0.0-CK-6-docs-SNAPSHOT`
+(last release plus branch), deploys it to `maven-snapshots`, and the merge creates nothing: no commit, tag,
+release or Nexus release.
+
+**Hotfix** — `hotfix/2.0.1` cut from tag `2.0.1`, `fix(CK-4)` pushed, Run workflow **Release** on it:
+
+| Item | Before | Hotfix PR into `master` | After Run workflow |
+| --- | --- | --- | --- |
+| `pom.xml` in git (`hotfix/2.0.1`) | `2.0.1` | `2.0.1` | `2.0.2-hotfix.1` (`chore(release)` on the hotfix branch) |
+| `pom.xml` in git (`master`) | `3.0.0` | `3.0.0` | `3.0.0` (until the PR is merged) |
+| `pom.xml` in CI | — | `3.0.1-hotfix-2.0.1-SNAPSHOT` | `2.0.2-hotfix.1` |
+| Nexus `hello-lib`, `hello-service` | `maven-releases` `2.0.1` | `maven-snapshots` `3.0.1-hotfix-2.0.1-SNAPSHOT` | `maven-releases` `2.0.2-hotfix.1` |
+| Image tags | `2.0.1` | `3.0.1-hotfix-2.0.1-SNAPSHOT` | `2.0.2-hotfix.1`, `2.0.2-hotfix.1-oci`, **no** `latest` |
+| Git tag / GitHub Release | `2.0.1` | — | `2.0.2-hotfix.1`, Pre-release (Latest stays `3.0.0`) |
+
+The Nexus of a CI job lives only as long as the job (docker compose on the runner): the tables show what each
+build deploys and the step summary proves it with the Nexus search API. A shared Nexus replaces it by changing
+`nexus.url` and the credentials.
+
+## Hotfix
+
+| | Regular release | Hotfix |
+| --- | --- | --- |
+| Branch | `master` | `hotfix/<production tag>`, cut from that tag |
+| Version | `3.0.1` | `2.0.2-hotfix.1`, `2.0.2-hotfix.2`, ... |
+| Trigger | squash merge | manual **Run workflow** of Release on the hotfix branch |
+| GitHub Release | Latest | Pre-release |
+| Docker `latest` | yes | no |
+
+```bash
+git fetch --tags
+git switch -c hotfix/2.0.1 2.0.1                     # the version in production
+git commit -am "fix(CK-4): drain in-flight requests on shutdown"
+git push -u origin hotfix/2.0.1
+gh pr create --base master --head hotfix/2.0.1 --title "fix(CK-4): drain in-flight requests on shutdown"
+gh workflow run release.yml --ref hotfix/2.0.1 -f dry_run=true   # print only
+gh workflow run release.yml --ref hotfix/2.0.1                   # 2.0.2-hotfix.1
+```
+
+Then **merge** the PR (squash: `master` releases the next patch with the fix) or **close** it (`master` is
+unaffected).
+
+Rules:
+
+- The branch name must be `hotfix/<production tag>`; the base version is read from it.
+- Patch-level changes only (`fix`, `perf`, `revert`).
+- Release every hotfix before "Update branch": once `master` is merged in, hotfix releases are blocked.
+- After a hotfix release the PR conflicts on the `pom.xml` versions: resolve it keeping the `master` version,
+  as the last step before the merge.
+- A hotfix runs the workflows as they were at its tag. Tags `1.0.0` and `2.0.0` predate this design, so they
+  cannot be hotfixed with it; hotfixes start with the first tag released by this design.
+
+### Two hotfixes at the same time on the same tag
+
+Two production bugs on `2.0.1` (CK-4 and CK-5) are fixed in parallel. The branch name is fixed by the rule
+(`hotfix/<production tag>`), so there is **one** hotfix branch, `hotfix/2.0.1`, and both fixes go into it:
+
+1. Each developer branches from the hotfix branch and opens a PR **into `hotfix/2.0.1`**: `CK-4-drain` →
+   `fix(CK-4): drain in-flight requests on shutdown`, `CK-5-timeout` → `fix(CK-5): raise the client timeout`.
+   The PR checks run against the hotfix base: `snapshot-version` previews `2.0.2-hotfix.1` and `build` deploys
+   `2.0.2-hotfix.1-CK-4-drain-SNAPSHOT`.
+2. CK-4 is squash-merged first. **Run workflow** Release on `hotfix/2.0.1` releases `2.0.2-hotfix.1` (CK-4) and
+   commits the `pom.xml` files on the hotfix branch.
+3. The CK-5 PR is now behind (the squash of CK-4 and the release commit): **Update branch**, checks again, merge.
+   The next Run workflow releases `2.0.2-hotfix.2` = `2.0.1` + CK-4 + CK-5. Hotfixes are cumulative.
+4. Production deploys `2.0.2-hotfix.2` (it contains both fixes); `2.0.2-hotfix.1` is skipped or replaced.
+5. One PR `hotfix/2.0.1` → `master` carries both fixes to `master` (after the last hotfix release, see the rules).
+
+```mermaid
+%%{init: {'gitGraph': {'mainBranchName': 'master', 'rotateCommitLabel': false}}}%%
+gitGraph
+  commit id: "prod" tag: "2.0.1"
+  branch hotfix/2.0.1
+  checkout master
+  commit id: "feat CK-2" tag: "2.1.0"
+  checkout hotfix/2.0.1
+  branch CK-4-drain
+  commit id: "fix CK-4"
+  checkout hotfix/2.0.1
+  branch CK-5-timeout
+  commit id: "fix CK-5"
+  checkout hotfix/2.0.1
+  merge CK-4-drain id: "squash CK-4"
+  commit id: "rel h.1" tag: "2.0.2-hotfix.1"
+  checkout CK-5-timeout
+  merge hotfix/2.0.1 id: "update"
+  checkout hotfix/2.0.1
+  merge CK-5-timeout id: "squash CK-5"
+  commit id: "rel h.2" tag: "2.0.2-hotfix.2"
+  checkout master
+  merge hotfix/2.0.1 id: "port" tag: "2.1.1"
+```
+
+`prod` is the release running in production; `rel` is the `chore(release)` commit of the `pom.xml` files; `update` is the "Update branch" of the CK-5 PR; `port` is the squash of the PR `hotfix/2.0.1` → `master` with both fixes.
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    actor Dev as Producer developer
-    participant LIB as Library PR CK-1111
-    participant NS as Nexus snapshots
-    actor Con as Consumer developer
-    participant CON as Consumer PR
-    participant NR as Nexus releases
-
-    Dev->>LIB: push (pom stays 0.0.0-SNAPSHOT)
-    LIB->>NS: deploy 0.0.0-CK-1111-SNAPSHOT (library modules, no Docker image)
-    Con->>CON: set dependency version 0.0.0-CK-1111-SNAPSHOT
-    CON->>NS: mvn -U verify
-    Dev->>LIB: push fix
-    LIB->>NS: redeploy 0.0.0-CK-1111-SNAPSHOT (new timestamp)
-    Dev->>LIB: squash merge "feat: CK-1111 ..."
-    LIB->>NR: semantic-release deploys x.y.z
-    LIB->>NS: PR closed, DELETE 0.0.0-CK-1111-SNAPSHOT
-    Con->>CON: set dependency version x.y.z
-    CON->>CON: enforcer requireReleaseDeps passes, merge
+  autonumber
+  actor A as Dev A (CK-4)
+  actor B as Dev B (CK-5)
+  participant H as hotfix/2.0.1
+  participant R as Release (Run workflow)
+  A->>H: PR fix(CK-4), squash merge
+  B->>H: PR fix(CK-5) open, behind after CK-4
+  A->>R: Run workflow on hotfix/2.0.1
+  R-->>H: tag 2.0.2-hotfix.1 (CK-4), chore(release) pom commit
+  B->>H: Update branch, checks, squash merge
+  B->>R: Run workflow on hotfix/2.0.1
+  R-->>H: tag 2.0.2-hotfix.2 (CK-4 + CK-5)
 ```
 
-```mermaid
-stateDiagram-v2
-    [*] --> Published: first push to PR CK-XXXX
-    Published --> Published: next push (same version, new timestamp)
-    Published --> Deleted: PR merged (x.y.z released)
-    Published --> Deleted: PR closed without merge
-    Published --> Deleted: not downloaded in 60 days (Nexus cleanup)
-    Deleted --> [*]
+| Item | After CK-4 release | After CK-5 release |
+| --- | --- | --- |
+| `pom.xml` in git (`hotfix/2.0.1`) | `2.0.2-hotfix.1` | `2.0.2-hotfix.2` |
+| Nexus `hello-lib`, `hello-service` (`maven-releases`) | `2.0.2-hotfix.1` | `2.0.2-hotfix.1`, `2.0.2-hotfix.2` |
+| Image tags | `2.0.2-hotfix.1`, `2.0.2-hotfix.1-oci` | `2.0.2-hotfix.2`, `2.0.2-hotfix.2-oci` (never `latest`) |
+| Git tag / GitHub Release | `2.0.2-hotfix.1`, Pre-release | `2.0.2-hotfix.2`, Pre-release (Latest stays on `master`) |
+
+What to know:
+
+- **No race:** the Release workflow has `concurrency: release-${{ github.ref }}` without cancellation, so two
+  Run workflow on the same hotfix branch run one after the other, and semantic-release numbers them in order.
+- **Release right after each merge** if each fix must get its own version; if both are merged before running the
+  workflow, one run releases both as `2.0.2-hotfix.1`.
+- **B without A is not possible** once A is on the branch: revert A with a `revert(CK-4): ...` PR into the hotfix
+  branch, which releases the next `hotfix.N`.
+- **Direct pushes** to `hotfix/2.0.1` are accepted but run no checks; with two developers, prefer PRs into the
+  hotfix branch, and pull before pushing because every release adds a `chore(release)` commit there.
+- **Port to `master`:** the single PR `hotfix/2.0.1` → `master` is squashed into one commit with one title, so
+  name both keys in its description, or port each fix with its own cherry-pick PR.
+
+**Why `2.0.2-hotfix.1`:** in SemVer a `-suffix` sorts before the plain version (`2.0.1-rc.1 < 2.0.1`), so
+`2.0.1-hotfix.1` would look **older** than production, a plain `2.0.2` belongs to the regular `master` releases
+(in the reference scenario the next patch was already taken) and would hide that it is a hotfix, and `2.0.1.1` is
+not SemVer.
+`2.0.1 < 2.0.2-hotfix.1 < 2.0.2` means exactly "2.0.1 plus a fix". (Maven sorts it after `2.0.2`; irrelevant for
+deployed services.)
+
+## Snapshot
+
+Every PR into `master` or `hotfix/**` builds `<next>-<branch>-SNAPSHOT` and deploys it to `maven-snapshots`:
+
+- `<next>` is the version the PR releases once squash-merged, from a semantic-release dry run of the base branch
+  plus the future squash commit (PR title and description). A PR that does not release uses the last release.
+- `<branch>` is the PR head branch with every character outside `[A-Za-z0-9.]` replaced by `-`, at most 60
+  characters (`feature/CK-12_greeting` → `feature-CK-12-greeting`).
+- The job runs no PR code: it checks out the base commit, so a PR cannot change the scripts that compute it.
+
+## Version of a running service
+
+`hello-service` stamps the version into the artifact: `spring-boot-maven-plugin` `build-info` writes
+`META-INF/build-info.properties` (the `pom.xml` version set by `versions:set`) and `git-commit-id-maven-plugin`
+writes `git.properties`. `/actuator/info` serves both:
+
+```bash
+curl -s localhost:8080/actuator/info
+# {"git":{"branch":"master","commit":{"id":"1a2b3c4","time":"..."}},
+#  "build":{"artifact":"hello-service","name":"hello-service","version":"2.0.1","group":"com.avall.poc"}}
 ```
 
-**Why one version per Jira key, and not a shared `0.0.0-SNAPSHOT` or `x.y.z-SNAPSHOT`:**
-- `x.y.z` is unknown while the PR is open: semantic-release calculates it from the PR title on merge.
-- With one shared version and a deploy on every push, every open PR of the library overwrites the same jar all day. A consumer testing CK-1111 can download CK-2222's code.
-- `0.0.0-CK-XXXX-SNAPSHOT` sorts below every real release, so it never wins a version range. Developers who want to share code work on the same branch.
+## Local setup
 
-**Consumer side.** The consumer edits its own pom (usually a property such as `<cnr.bi.reporting.version>`) to `0.0.0-CK-XXXX-SNAPSHOT`, and sets it to `x.y.z` before merging. The release build of every service runs `maven-enforcer-plugin` with `requireReleaseDeps`, so no release ships with a `-SNAPSHOT` dependency.
+```bash
+git config core.hooksPath .github/hooks          # once per clone: commit-msg check
+./mvnw clean verify                              # unit (*Test) + integration (*IT) tests, both modules
+./mvnw -q install -DskipTests && ./mvnw -pl hello-service spring-boot:run
+                                                 # http://localhost:8080/hello, /swagger-ui.html, /actuator/info
+```
 
-The workflow sketch and the Nexus cleanup configuration are in the proposal, §8.
+Deploy to a local Nexus ([`docker-compose.yml`](docker-compose.yml), `sonatype/nexus3`, port 8081, volume
+`nexus-data`):
 
-**Open points (not verified):**
-- Does the CI Nexus user (`NEXUS_DEPLOY_*`) have the delete privilege on `snapshots`?
-- Two open PRs with the same Jira key (for example a `gh stack`) share one snapshot. The last push wins. Closing the first PR deletes the snapshot, and the next push of the second PR publishes it again.
-- Modules with their own version line either join the parent version or move out of the reactor. Otherwise the release keeps publishing them as a side effect.
+```bash
+docker compose up -d                                         # first start takes 1-2 minutes
+NEXUS_ACCEPT_EULA=true .github/scripts/nexus-up.sh           # waits, writes target/nexus-settings.xml
+./mvnw -s target/nexus-settings.xml deploy                   # current version: maven-releases
+./mvnw versions:set -DnewVersion=2.0.1-local-SNAPSHOT -DgenerateBackupPoms=false -DprocessAllModules=true
+./mvnw -s target/nexus-settings.xml deploy                   # maven-snapshots
+git checkout -- pom.xml '**/pom.xml'                         # back to the committed version
+docker compose down -v                                       # stop and wipe Nexus
+```
 
-## Troubleshooting
+- `nexus-up.sh` reads the generated admin password from `/nexus-data/admin.password` and writes a
+  `settings.xml` with the server ids `nexus-releases` and `nexus-snapshots` of `distributionManagement`. Never
+  commit it. Run it again after `./mvnw clean` (it is idempotent); set `NEXUS_PASSWORD` once the password was
+  changed in the UI.
+- Nexus Community Edition rejects uploads (HTTP 403) until its
+  [EULA](https://links.sonatype.com/products/nxrm/ce-eula) is accepted. `NEXUS_ACCEPT_EULA=true` accepts it
+  through the REST API; the workflows set it.
+- `maven-releases` accepts a release version once: redeploying the same `X.Y.Z` fails until the volume is wiped.
+- UI at <http://localhost:8081> (user `admin`).
 
-- **Node 20 is gone from GitHub Actions.** All actions are pinned to Node 24 releases (`checkout v7.0.1`, `setup-java v6.1.0`, `setup-node v7.1.0`, `semantic-release-action v8.1.3`, `action-semantic-pull-request v6.1.1`). Pin them to commit SHAs before real use.
-- **Tags and releases created with `GITHUB_TOKEN` do not trigger other workflows.** That is why build and deploy run in `release.yml` with `needs:` instead of listening to `release` events.
-- **Rulesets on a private repo of a free User account return HTTP 403** ("Upgrade to GitHub Pro or make this repository public"). The setup script prints the error and continues; without rulesets nothing enforces PRs, squash only or required checks, so the use cases still run but direct pushes are possible.
-- **The first release is always 1.0.0.** With no tag matching `tagFormat` (`X.Y.Z`), semantic-release starts at 1.0.0 whatever the first bump is.
-- **Guard failed.** Someone edited the merge subject, added a body in the merge dialog, or pushed directly. GitHub's own `Co-authored-by` / `Signed-off-by` trailers are accepted (`scripts/check-commit-message.sh`, tested in `tests/run.sh`). No tag is created; fix forward with a correctly titled PR (use case 10).
-- **`pr-title` fails on a hotfix PR.** Only `fix`, `perf` and `revert` without `!` are accepted on `hotfix/**` (use case 12).
-- **`hotfix-release` fails with "Tag ... already exists".** The tag is never overwritten. Check the tags of the line and re-run the job after the cause is fixed.
-- **`hotfix-start` fails with "Tag X.Y.Z does not exist" or a `hotfix-version:` error.** `base_tag` must be an existing `X.Y.Z` or `X.Y.Z-hotfix.N` tag.
+## Repository settings
+
+- **Pull requests**: allow squash merging only, default commit message "Pull request title" (title = PR title,
+  blank body); the PR title decides the bump. The snapshot preview also reads the PR description, so keep breaking
+  changes in the title (`!`).
+- **Ruleset `master`**: require a pull request (squash only); required status checks `pr-title` and `build`
+  (`snapshot-version` runs on every PR but is not required); "up to date" off; block force pushes and deletion.
+- **Release commit bypass**: the release pushes `chore(release): X.Y.Z [skip ci]` to `master` with the secret
+  `PUSH_TO_PROTECTED_BRANCH`. For a personal repository it is a fine-grained PAT of the owner (Contents: read and
+  write on this repository), and the **Repository admin** role is in the `master` ruleset bypass list.
+  `[skip ci]` keeps the commit from starting another run.
+- **`hotfix/**`**: no pull request rule, direct pushes accepted (the hotfix release commits its `pom.xml` there).
+- **Ruleset for tags** (all tags): restrict updates and deletions, so a released version never moves. GitHub
+  [immutable releases](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases)
+  add the same guarantee to release assets.
+
+| Workflow | Trigger | Jobs |
+| --- | --- | --- |
+| `pr-conventions.yml` | PR into `master` / `hotfix/**` | `pr-title` |
+| `ci.yml` | PR into `master` / `hotfix/**` | `snapshot-version`, `build` |
+| `release.yml` | push to `master`, or Run workflow on `master` / `hotfix/X.Y.Z` (`dry_run`) | `semantic-release` |
+
+- Composite steps live in `.github/actions/`, config in `.github/release/releaserc.json`, scripts and the
+  commit hook in `.github/scripts/` and `.github/hooks/`.
+- Jobs run on GitHub-hosted `ubuntu-latest` runners; actions are referenced by version tag.
+- semantic-release `25.0.9` with `conventional-changelog-conventionalcommits@9.3.1` (10.x needs a newer
+  changelog writer than semantic-release 25 bundles) and `@semantic-release/git@11.0.1`.
+
+## References
+
+Standards and tools:
+
+- [Semantic Versioning 2.0.0](https://semver.org/) — precedence of pre-release versions (`2.0.2-hotfix.1 < 2.0.2`).
+- [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
+- semantic-release: [docs](https://semantic-release.gitbook.io/semantic-release/),
+  [workflow configuration](https://semantic-release.gitbook.io/semantic-release/usage/workflow-configuration)
+  (release and pre-release branches), [FAQ](https://semantic-release.gitbook.io/semantic-release/support/faq),
+  [@semantic-release/git](https://github.com/semantic-release/git).
+- [action-semantic-pull-request](https://github.com/amannn/action-semantic-pull-request) (PR title check).
+- Maven: [versions:set](https://www.mojohaus.org/versions/versions-maven-plugin/set-mojo.html),
+  [maven-deploy-plugin](https://maven.apache.org/plugins/maven-deploy-plugin/).
+- Sonatype Nexus Repository: [Maven repositories](https://help.sonatype.com/en/maven-repositories.html),
+  [search API](https://help.sonatype.com/en/search-api.html),
+  [Community Edition onboarding](https://links.sonatype.com/products/nxrm3/docs/ce-onboarding),
+  [docker image](https://hub.docker.com/r/sonatype/nexus3).
+- Spring Boot: [actuator endpoints (`info`)](https://docs.spring.io/spring-boot/reference/actuator/endpoints.html),
+  [build-info goal](https://docs.spring.io/spring-boot/maven-plugin/build-info.html),
+  [git-commit-id-maven-plugin](https://github.com/git-commit-id/git-commit-id-maven-plugin).
+
+GitHub:
+
+- [Rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets)
+  and [squash merge settings](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/configuring-commit-squashing-for-pull-requests).
+- [Immutable releases](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases).
+- [Secure use of GitHub Actions](https://docs.github.com/en/actions/reference/security/secure-use) and
+  [`pull_request_target`](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request_target)
+  (why the PR jobs use `pull_request` and run no PR code with write tokens).
+- [`GITHUB_TOKEN` permissions](https://docs.github.com/en/actions/concepts/security/github_token).
+
+Practices of large projects:
+
+- [A successful Git branching model](https://nvie.com/posts/a-successful-git-branching-model/) (git-flow
+  hotfix branches cut from the production tag).
+- [Kubernetes patch releases](https://kubernetes.io/releases/patch-releases/) (fixes on release branches of
+  supported versions).
+- [Google SRE book: Release Engineering](https://sre.google/sre-book/release-engineering/) (hermetic,
+  reproducible builds from tags; cherry-picks onto release branches).
+- [Martin Fowler: Continuous Integration](https://martinfowler.com/articles/continuousIntegration.html).

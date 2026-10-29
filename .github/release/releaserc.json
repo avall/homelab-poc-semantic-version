@@ -1,0 +1,21 @@
+{
+  "branches": ["master"],
+  "tagFormat": "${version}",
+  "plugins": [
+    ["@semantic-release/commit-analyzer", {
+      "preset": "conventionalcommits",
+      "releaseRules": [
+        { "type": "perf", "release": "patch" },
+        { "type": "revert", "release": "patch" }
+      ]
+    }],
+    ["@semantic-release/release-notes-generator", { "preset": "conventionalcommits" }],
+    ["@semantic-release/github", {
+      "successComment": false,
+      "failComment": false,
+      "releasedLabels": false,
+      "releaseNameTemplate": "<% if (branch.type === 'prerelease' && branch.prerelease === 'hotfix') { %>Hotfix <%= nextRelease.version %> (based on <%= branch.name.replace('hotfix/', '') %>)<% } else { %><%= nextRelease.version %><% } %>",
+      "releaseBodyTemplate": "<% if (branch.type === 'prerelease' && branch.prerelease === 'hotfix') { %>> **Hotfix** for production version <%= branch.name.replace('hotfix/', '') %>, built from tag <%= branch.name.replace('hotfix/', '') %> without later changes. Not marked as latest.\n\n<% } %><%= nextRelease.notes %>"
+    }]
+  ]
+}

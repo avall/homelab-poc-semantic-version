@@ -1,22 +1,83 @@
-name: ci
+name: CI
+
 on:
-  # No branch filter: stacked PRs target another PR branch and still need the required "build" check.
   pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches: [master, 'hotfix/**']
+
 permissions:
   contents: read
+
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number }}
   cancel-in-progress: true
+
 jobs:
-  build:                          # check name "build" is required by the branch ruleset
+  # Predicts the version this PR releases once squash-merged. Runs no PR code: the base commit is checked out,
+  # so the local actions, scripts and semantic-release config come from the base branch, and the PR is reduced
+  # to its squash commit message (title and description from the event).
+  # Fork PRs get a read-only token and fail here (semantic-release verifies push access even in dry-run).
+  snapshot-version:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      snapshot_version: ${{ steps.next.outputs.snapshot-version }}
+      next_version: ${{ steps.next.outputs.version }}
+      last_version: ${{ steps.next.outputs.last-version }}
+      release_type: ${{ steps.next.outputs.release-type }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/checkout@v7
         with:
-          distribution: temurin
-          java-version: '25'
-          cache: maven
-      - name: Script tests
-        run: bash tests/run.sh
-      - run: ./mvnw -B clean verify
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Compute next version
+        id: next
+        uses: ./.github/actions/snapshot-version
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          base-ref: ${{ github.base_ref }}
+          head-ref: ${{ github.head_ref }}
+          pr-title: ${{ github.event.pull_request.title }}
+          pr-body: ${{ github.event.pull_request.body }}
+
+  build:
+    needs: snapshot-version
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Start Nexus (docker compose)
+        env:
+          # Accepts the Sonatype Nexus Community Edition EULA: https://links.sonatype.com/products/nxrm/ce-eula
+          NEXUS_ACCEPT_EULA: 'true'
+        run: .github/scripts/nexus-up.sh
+
+      # `mvn clean deploy` runs unit (surefire) and integration (failsafe) tests, then deploys the snapshot
+      - name: Build, test and deploy snapshot to Nexus
+        uses: ./.github/actions/maven-build
+        with:
+          version: ${{ needs.snapshot-version.outputs.snapshot_version }}
+          deploy-repository: maven-snapshots
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: |
+            */target/surefire-reports/
+            */target/failsafe-reports/
+
+      - name: Build docker snapshot
+        uses: ./.github/actions/docker-image
+        with:
+          version: ${{ needs.snapshot-version.outputs.snapshot_version }}
+          latest: 'false'
+          latest-skip-reason: snapshot build

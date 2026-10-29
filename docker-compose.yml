@@ -1,0 +1,14 @@
+# Local Nexus Repository used by `mvn deploy`, locally and in every CI build.
+# Start it with `.github/scripts/nexus-up.sh` (or `docker compose up -d`); the admin password is generated on first
+# start in /nexus-data/admin.password. Stop and wipe it with `docker compose down -v`.
+services:
+  nexus:
+    image: sonatype/nexus3:3.97.2
+    container_name: homelab-poc-nexus
+    ports:
+      - "8081:8081"
+    volumes:
+      - nexus-data:/nexus-data
+
+volumes:
+  nexus-data:

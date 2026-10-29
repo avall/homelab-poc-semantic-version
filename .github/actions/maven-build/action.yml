@@ -1,0 +1,106 @@
+name: Maven build
+description: >
+  Sets the version of the parent and both modules in pom.xml with versions:set, builds, tests and deploys them to the
+  Nexus started by .github/scripts/nexus-up.sh (which exports NEXUS_URL, NEXUS_SETTINGS, NEXUS_USER, NEXUS_PASSWORD).
+  A -SNAPSHOT version goes to maven-snapshots, any other version to maven-releases (Maven picks the repository of
+  distributionManagement). The deployed artifacts are then read back from the Nexus REST API.
+  PR builds never commit the version change; the release commits it in github-release.
+
+inputs:
+  version:
+    description: Maven project version
+    required: true
+  goal:
+    description: Last lifecycle phase to run
+    required: false
+    default: deploy
+  deploy-repository:
+    description: Nexus repository the build deploys to (maven-snapshots or maven-releases)
+    required: true
+  group-id:
+    description: groupId of the deployed artifacts
+    required: false
+    default: com.avall.poc
+  modules:
+    description: Space-separated artifactIds that must be found in Nexus after the deploy
+    required: false
+    default: hello-lib hello-service
+  java-version:
+    description: Temurin JDK version
+    required: false
+    default: '25'
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: ${{ inputs.java-version }}
+        cache: maven
+
+    - name: Set version in pom.xml (versions:set)
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        ./mvnw -B -ntp versions:set -DnewVersion="$VERSION" -DgenerateBackupPoms=false -DprocessAllModules=true
+        git --no-pager diff -- '**/pom.xml' pom.xml
+
+    - name: Build and deploy to Nexus
+      shell: bash
+      env:
+        GOAL: ${{ inputs.goal }}
+        VERSION: ${{ inputs.version }}
+        REPOSITORY: ${{ inputs.deploy-repository }}
+      run: |
+        if [[ -z "${NEXUS_SETTINGS:-}" ]]; then
+          echo "::error::NEXUS_SETTINGS is not set: run .github/scripts/nexus-up.sh before this action"
+          exit 1
+        fi
+        expected=maven-releases
+        [[ "$VERSION" == *-SNAPSHOT ]] && expected=maven-snapshots
+        if [[ "$REPOSITORY" != "$expected" ]]; then
+          echo "::error::Version $VERSION deploys to $expected, not $REPOSITORY"
+          exit 1
+        fi
+        ./mvnw -B -ntp -s "$NEXUS_SETTINGS" -Dnexus.url="$NEXUS_URL" clean "$GOAL"
+
+    - name: Show deployed artifacts (Nexus REST)
+      if: inputs.goal == 'deploy'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        REPOSITORY: ${{ inputs.deploy-repository }}
+        GROUP_ID: ${{ inputs.group-id }}
+        MODULES: ${{ inputs.modules }}
+      run: |
+        set -euo pipefail
+        # maven.baseVersion matches X.Y.Z-branch-SNAPSHOT (stored with a timestamp) and release versions alike
+        query="repository=${REPOSITORY}&maven.groupId=${GROUP_ID}&maven.baseVersion=${VERSION}"
+        result="$RUNNER_TEMP/nexus-search.json"
+        for _ in $(seq 1 12); do
+          curl -fsS -u "$NEXUS_USER:$NEXUS_PASSWORD" -G "$NEXUS_URL/service/rest/v1/search" \
+            --data-urlencode "repository=${REPOSITORY}" --data-urlencode "maven.groupId=${GROUP_ID}" \
+            --data-urlencode "maven.baseVersion=${VERSION}" > "$result"
+          missing=()
+          for module in $MODULES; do
+            jq -e --arg a "$module" 'any(.items[]; .name == $a)' "$result" > /dev/null || missing+=("$module")
+          done
+          [[ ${#missing[@]} -eq 0 ]] && break
+          sleep 5
+        done
+        echo "GET $NEXUS_URL/service/rest/v1/search?${query}"
+        jq -r '.items[] | "\(.group):\(.name):\(.version) -> \(.repository)", (.assets[] | "  \(.path)")' "$result"
+        {
+          echo "### Maven build"
+          echo "| Item | Value |"
+          echo "| --- | --- |"
+          echo "| pom.xml version | \`$VERSION\` |"
+          echo "| Nexus repository | \`$REPOSITORY\` |"
+          jq -r '.items[] | "| Deployed | `\(.group):\(.name):\(.version)` |"' "$result"
+        } >> "$GITHUB_STEP_SUMMARY"
+        if [[ ${#missing[@]} -gt 0 ]]; then
+          echo "::error::Not found in Nexus $REPOSITORY with version $VERSION: ${missing[*]}"
+          exit 1
+        fi

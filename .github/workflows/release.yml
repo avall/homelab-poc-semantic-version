@@ -1,96 +1,114 @@
-name: release
+name: Release
+
 on:
   push:
-    branches:
-      - master                    # hotfix lines release with hotfix-release.yml
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Print the release instead of creating the tag and GitHub Release
+        type: boolean
+        default: false
+
 permissions:
   contents: read
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/avall/homelab-poc-semantic-version
+  ARTIFACTS: com.avall.poc:hello-lib, com.avall.poc:hello-service
+
 jobs:
-  release:
+  semantic-release:
+    name: Semantic release (version, build, tag and GitHub Release)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # semantic-release verifies push access even in dry-run mode, and creates the tag and GitHub Release
     permissions:
-      contents: write             # tag + GitHub Release
-      pull-requests: read         # guard: find the PR of each commit
-    outputs:
-      published: ${{ steps.sr.outputs.new_release_published }}
-      version: ${{ steps.sr.outputs.new_release_version }}
-      tag: ${{ steps.sr.outputs.new_release_git_tag }}
+      contents: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
-          fetch-depth: 0          # all tags and history
-      - name: Guard - commit subject must equal its PR title, body only trailers
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Calculate next version (semantic-release dry run)
+        id: version
+        uses: ./.github/actions/semantic-version
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+
+      - name: Validate version
+        if: steps.version.outputs.published == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BEFORE: ${{ github.event.before }}
-          AFTER: ${{ github.sha }}
-          REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          for sha in $(git rev-list "$BEFORE..$AFTER"); do
-            pr=$(gh api "repos/$REPO/commits/$sha/pulls" --jq '.[0] | "\(.number)\t\(.title)"')
-            [ -n "$pr" ] || { echo "::error::$sha has no PR"; exit 1; }
-            expected="$(cut -f2- <<<"$pr") (#$(cut -f1 <<<"$pr"))"
-            # GitHub appends Co-authored-by / Signed-off-by trailers even with a BLANK squash message
-            reason=$(git log -1 --format=%B "$sha" | scripts/check-commit-message.sh "$expected") \
-              || { echo "::error::$sha $reason"; exit 1; }
-            echo "OK $sha: $expected"
-          done
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-      - id: sr
-        uses: cycjimmy/semantic-release-action@d9bf53a078bd2f86aaffaec796dbb3d28f1b6f34 # v8.1.3
-        with:
-          semantic_version: 25.0.9
-          extra_plugins: conventional-changelog-conventionalcommits@9.3.1   # 10.x needs conventional-changelog-writer@9; semantic-release 25 ships writer@8
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-hotfix\.[0-9]+)?$ ]]; then
+            echo "::error::Invalid release version '$RELEASE_VERSION'"
+            exit 1
+          fi
+
+      - name: Start Nexus (docker compose)
+        if: steps.version.outputs.published == 'true'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Accepts the Sonatype Nexus Community Edition EULA: https://links.sonatype.com/products/nxrm/ce-eula
+          NEXUS_ACCEPT_EULA: 'true'
+        run: .github/scripts/nexus-up.sh
+
+      - name: Build, test and deploy release to Nexus
+        if: steps.version.outputs.published == 'true'
+        uses: ./.github/actions/maven-build
+        with:
+          version: ${{ steps.version.outputs.version }}
+          deploy-repository: maven-releases
+
+      - name: Build docker images (push printed)
+        if: steps.version.outputs.published == 'true'
+        uses: ./.github/actions/docker-image
+        with:
+          version: ${{ steps.version.outputs.version }}
+          latest: ${{ steps.version.outputs.hotfix != 'true' }}
+
+      - name: Create tag and GitHub Release (semantic-release)
+        id: release
+        if: steps.version.outputs.published == 'true'
+        uses: ./.github/actions/github-release
+        with:
+          version: ${{ steps.version.outputs.version }}
+          # Pushes the chore(release) pom.xml commit to the protected master: the token owner must be in the
+          # master ruleset bypass list. [skip ci] in the commit avoids a new workflow run.
+          github-token: ${{ secrets.PUSH_TO_PROTECTED_BRANCH }}
+          dry-run: ${{ inputs.dry_run == true }}
+
       - name: Summary
+        if: always() && steps.version.outputs.published == 'true'
         env:
-          PUBLISHED: ${{ steps.sr.outputs.new_release_published }}
-          VERSION: ${{ steps.sr.outputs.new_release_version }}
+          BRANCH: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          LAST_VERSION: ${{ steps.version.outputs.last-version }}
+          HOTFIX: ${{ steps.version.outputs.hotfix }}
+          TAG_RESULT: ${{ inputs.dry_run == true && 'dry run (not created)' || steps.release.outputs.published == 'true' && 'created' || 'not created' }}
         run: |
-          if [ "$PUBLISHED" = "true" ]; then msg="Released $VERSION"; else msg="No release: no releasable commit since the last tag"; fi
-          echo "$msg"
-          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
-
-  build:
-    needs: release
-    if: needs.release.outputs.published == 'true'
-    runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ needs.release.outputs.version }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.release.outputs.tag }}
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
-        with:
-          distribution: temurin
-          java-version: '25'
-          cache: maven
-      - name: Stamp version and build
-        run: |
-          ./mvnw -B versions:set -DnewVersion="$VERSION" -DgenerateBackupPoms=false
-          ./mvnw -B verify
-      - name: Container image names (no docker build in the POC)
-        run: |
-          for image in "ghcr.io/avall/homelab-poc-semantic-version:$VERSION-oci" "ghcr.io/avall/homelab-poc-semantic-version:$VERSION"; do
-            echo "IMAGE $image"
-            echo "IMAGE \`$image\`" >> "$GITHUB_STEP_SUMMARY"
-          done
-
-  deploy:
-    needs: [release, build]
-    runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ needs.release.outputs.version }}
-    steps:
-      - name: Deployment (simulated)
-        run: |
-          msg="DEPLOYMENT OF VERSION $VERSION completed in the infra"
-          echo "$msg"
-          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+          tags="\`$IMAGE:$RELEASE_VERSION\`, \`$IMAGE:$RELEASE_VERSION-oci\`"
+          if [[ "$HOTFIX" == "true" ]]; then
+            hotfix=yes latest=no
+          else
+            hotfix=no latest=yes
+            tags="$tags, \`$IMAGE:latest\`"
+          fi
+          {
+            echo "### Release"
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Branch | \`$BRANCH\` |"
+            echo "| Hotfix | $hotfix |"
+            echo "| Last version | \`${LAST_VERSION:-none}\` |"
+            echo "| Next version | \`$RELEASE_VERSION\` |"
+            echo "| GitHub \"Latest\" expected | $latest |"
+            echo "| Maven artifacts | $ARTIFACTS \`$RELEASE_VERSION\` (Nexus \`maven-releases\`) |"
+            echo "| Docker tags | $tags (not pushed) |"
+            echo "| Tag / GitHub Release | $TAG_RESULT |"
+          } >> "$GITHUB_STEP_SUMMARY"
