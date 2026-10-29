@@ -1,5 +1,7 @@
 # homelab-poc-semantic-version
 
+[![Latest release](https://img.shields.io/github/v/release/avall/homelab-poc-semantic-version?sort=semver&label=latest%20release)](https://github.com/avall/homelab-poc-semantic-version/releases/latest)
+
 POC of a release flow on a two-module Java 25 / Spring Boot 4 hello world: **the version is a consequence of what
 is merged**. [semantic-release](https://semantic-release.gitbook.io/) calculates it from
 [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). Git tags, GitHub Releases, the release
@@ -303,6 +305,9 @@ curl -s localhost:8080/actuator/info
 # {"git":{"branch":"master","commit":{"id":"1a2b3c4","time":"..."}},
 #  "build":{"artifact":"hello-service","name":"hello-service","version":"2.0.1","group":"com.avall.poc"}}
 ```
+
+The badge at the top shows the latest GitHub Release (shields.io reads the public GitHub API, so it only works on public
+repositories). It is the latest release, not necessarily the version in production.
 
 ## Local setup
 
