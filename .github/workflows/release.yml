@@ -39,7 +39,7 @@ jobs:
         id: version
         uses: ./.github/actions/semantic-version
         with:
-          github-token: ${{ secrets.GH_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Validate version
         if: steps.version.outputs.published == 'true'
