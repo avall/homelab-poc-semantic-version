@@ -1,0 +1,3 @@
+# Jobs run on GitHub-hosted runners (ubuntu-latest): no self-hosted runner labels to declare.
+self-hosted-runner:
+  labels: []
