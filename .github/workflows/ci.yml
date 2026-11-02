@@ -74,9 +74,9 @@ jobs:
         env:
           SNAPSHOT_VERSION: ${{ needs.snapshot-version.outputs.snapshot_version }}
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq figlet > /dev/null
+          sudo apt-get update -qq && sudo apt-get install -y -qq figlet > /dev/null 2>&1
           # Spaces around dashes let figlet wrap long versions without cutting a word
-          figlet -w 80"${SNAPSHOT_VERSION//-/ - }"
+          figlet -w 80 "${SNAPSHOT_VERSION//-/ - }"
           echo "Snapshot version: ${SNAPSHOT_VERSION}"
 
       - name: Upload test reports
