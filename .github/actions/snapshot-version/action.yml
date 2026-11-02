@@ -1,0 +1,124 @@
+name: Snapshot version
+description: >
+  PR-side version calculation (the snapshot version written into the pom.xml of the PR build). Runs a semantic-release dry run
+  on the base branch plus the future squash commit (PR title and description) and derives `<next>-<branch>-SNAPSHOT`.
+  Runs no PR code: the caller checks out the base commit and the PR is reduced to its commit message.
+  Requires a full-history checkout and a token with contents: write (semantic-release checks push access).
+
+inputs:
+  github-token:
+    description: Token used by semantic-release
+    required: true
+  base-ref:
+    description: PR base branch (master or hotfix/X.Y.Z)
+    required: true
+  head-ref:
+    description: PR head branch, added to the snapshot version so parallel PRs never overwrite each other
+    required: true
+  pr-title:
+    description: PR title, first line of the squash commit
+    required: true
+  pr-body:
+    description: PR description, body of the squash commit
+    required: false
+    default: ''
+
+outputs:
+  snapshot-version:
+    description: <next>-<branch>-SNAPSHOT, or <last>-<branch>-SNAPSHOT when the PR does not release
+    value: ${{ steps.next.outputs.snapshot_version }}
+  version:
+    description: Version the PR releases once merged, or `none`
+    value: ${{ steps.next.outputs.next_version }}
+  last-version:
+    description: Last release on the base branch, or `none`
+    value: ${{ steps.next.outputs.last_version }}
+  release-type:
+    description: major, minor, patch or n/a
+    value: ${{ steps.next.outputs.release_type }}
+  hotfix:
+    description: true when the base branch is hotfix/X.Y.Z
+    value: ${{ steps.next.outputs.hotfix }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 24
+
+    - name: Compute next version
+      id: next
+      shell: bash
+      env:
+        BASE_REF: ${{ inputs.base-ref }}
+        HEAD_REF: ${{ inputs.head-ref }}
+        PR_TITLE: ${{ inputs.pr-title }}
+        PR_BODY: ${{ inputs.pr-body }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        # Copy the scripts before switching the working tree to the base branch tip
+        scripts="$RUNNER_TEMP/release-scripts"
+        rm -rf "$scripts" && cp -R "$GITHUB_ACTION_PATH/../../scripts" "$scripts"
+        hotfix=$(bash "$scripts/prepare-releaserc.sh" "$BASE_REF")
+        git checkout -q -B "$BASE_REF" "origin/${BASE_REF}"
+
+        # Squash commit as GitHub creates it: PR title, blank line, PR description
+        msg_file="$RUNNER_TEMP/squash-msg.txt"
+        printf '%s\n' "$PR_TITLE" > "$msg_file"
+        if [[ -n "${PR_BODY//[[:space:]]/}" ]]; then
+          printf '\n%s\n' "$PR_BODY" >> "$msg_file"
+        fi
+        git -c user.name="github-actions[bot]" \
+          -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+          commit -q --allow-empty --no-verify -F "$msg_file"
+
+        # Present the run as a push to the base branch so semantic-release evaluates it
+        log="$RUNNER_TEMP/semantic-release.log"
+        set +e
+        GITHUB_EVENT_NAME=push GITHUB_REF="refs/heads/${BASE_REF}" GITHUB_HEAD_REF='' GITHUB_BASE_REF='' \
+          npx --yes -p semantic-release@25.0.9 -p conventional-changelog-conventionalcommits@9.3.1 \
+          semantic-release --dry-run --no-ci 2>&1 | tee "$log"
+        status=${PIPESTATUS[0]}
+        set -e
+        if [[ "$status" -ne 0 ]]; then
+          echo "::error::semantic-release dry run failed (exit $status)"
+          exit "$status"
+        fi
+
+        next=$(sed -nE 's/.*[Tt]he next release version is ([0-9A-Za-z.-]+).*/\1/p' "$log" | tail -n 1)
+        last=$(sed -nE 's/.*associated with version ([0-9A-Za-z.-]+) on branch.*/\1/p' "$log" | tail -n 1)
+        type=$(sed -nE 's/.*Analysis of [0-9]+ commits complete: (major|minor|patch) release.*/\1/p' "$log" | tail -n 1)
+
+        if ! reason=$(bash "$scripts/hotfix-guard.sh" "$BASE_REF" "$next" "$last"); then
+          echo "::error::${reason}"
+          echo "### Release preview" >> "$GITHUB_STEP_SUMMARY"
+          echo "Rejected: ${reason}." >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+        fi
+
+        # Branch qualifier: e.g. feature/CK-12_x -> feature-CK-12-x (valid in Maven versions and docker tags)
+        branch=$(printf '%s' "$HEAD_REF" | sed -E 's/[^A-Za-z0-9.]+/-/g; s/^[-.]+//; s/[-.]+$//' | cut -c1-60 | sed -E 's/[-.]+$//')
+        if [[ -n "$next" ]]; then
+          snapshot="${next}-${branch}-SNAPSHOT"
+          preview="This PR will release \`${next}\` on \`${BASE_REF}\` (${type:-n/a}, last release \`${last:-none}\`)."
+        else
+          snapshot="${last:-0.0.0}-${branch}-SNAPSHOT"
+          next=none
+          preview="This PR does not trigger a release on \`${BASE_REF}\` (last release \`${last:-none}\`)."
+        fi
+
+        {
+          echo "snapshot_version=${snapshot}"
+          echo "next_version=${next}"
+          echo "last_version=${last:-none}"
+          echo "release_type=${type:-n/a}"
+          echo "hotfix=${hotfix}"
+        } >> "$GITHUB_OUTPUT"
+        {
+          echo "### Release preview"
+          echo "$preview"
+          echo ""
+          echo "Snapshot version: \`${snapshot}\`"
+        } >> "$GITHUB_STEP_SUMMARY"

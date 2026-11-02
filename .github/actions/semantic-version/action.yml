@@ -1,0 +1,99 @@
+name: Semantic version
+description: >
+  Release-side version calculation (the version written into the pom.xml by versions:set). Runs a semantic-release
+  dry run on the current branch with the config from master, adding hotfix/X.Y.Z as a `hotfix` prerelease branch,
+  and fails when a hotfix branch would not release X.Y.(Z+1)-hotfix.N.
+  Requires a full-history checkout and a token with contents: write (semantic-release checks push access).
+
+inputs:
+  github-token:
+    description: Token used by semantic-release
+    required: true
+  branch:
+    description: Branch being released
+    required: false
+    default: ${{ github.ref_name }}
+
+outputs:
+  published:
+    description: true when the branch has a release to publish
+    value: ${{ steps.semantic.outputs.new_release_published || 'false' }}
+  version:
+    description: Next release version
+    value: ${{ steps.semantic.outputs.new_release_version }}
+  last-version:
+    description: Last release version on the branch
+    value: ${{ steps.semantic.outputs.last_release_version }}
+  hotfix:
+    description: true when the branch is hotfix/X.Y.Z
+    value: ${{ steps.config.outputs.hotfix }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare release config
+      id: config
+      shell: bash
+      env:
+        BRANCH: ${{ inputs.branch }}
+      run: |
+        set -euo pipefail
+        if [[ "$BRANCH" =~ ^hotfix/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          base="${BRANCH#hotfix/}"
+          if ! git rev-parse -q --verify "refs/tags/${base}" > /dev/null; then
+            echo "::error::Tag ${base} does not exist: hotfix branches must be named after the production tag they were cut from"
+            exit 1
+          fi
+        fi
+        hotfix=$(bash "$GITHUB_ACTION_PATH/../../scripts/prepare-releaserc.sh" "$BRANCH")
+        echo "hotfix=${hotfix}" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 24
+
+    - id: semantic
+      uses: cycjimmy/semantic-release-action@v8.1.3
+      with:
+        semantic_version: 25.0.9
+        dry_run: true
+        extra_plugins: |
+          conventional-changelog-conventionalcommits@9.3.1
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+
+    - name: Hotfix guard
+      if: steps.config.outputs.hotfix == 'true' && steps.semantic.outputs.new_release_published == 'true'
+      shell: bash
+      env:
+        BRANCH: ${{ inputs.branch }}
+        NEXT: ${{ steps.semantic.outputs.new_release_version }}
+        LAST: ${{ steps.semantic.outputs.last_release_version }}
+      run: |
+        set -euo pipefail
+        if ! reason=$(bash "$GITHUB_ACTION_PATH/../../scripts/hotfix-guard.sh" "$BRANCH" "$NEXT" "$LAST"); then
+          echo "::error::${reason}"
+          exit 1
+        fi
+
+    - name: Summary
+      shell: bash
+      env:
+        BRANCH: ${{ inputs.branch }}
+        HOTFIX: ${{ steps.config.outputs.hotfix }}
+        PUBLISHED: ${{ steps.semantic.outputs.new_release_published }}
+        VERSION: ${{ steps.semantic.outputs.new_release_version }}
+        LAST_VERSION: ${{ steps.semantic.outputs.last_release_version }}
+      run: |
+        {
+          echo "### Next version"
+          echo "- Branch: \`$BRANCH\` (hotfix: $HOTFIX)"
+          echo "- Release needed: ${PUBLISHED:-false}"
+          echo "- Next version: ${VERSION:-none}"
+          echo "- Last version: ${LAST_VERSION:-none}"
+          if [[ "$PUBLISHED" != "true" ]]; then
+            echo ""
+            echo "No release: either no releasable commits (\`fix\`, \`feat\`, \`perf\`, \`revert\`, breaking change) since the last release,"
+            echo "or \`$BRANCH\` is not a release branch (\`master\` or \`hotfix/<production tag>\`)."
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"

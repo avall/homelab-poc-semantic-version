@@ -1,0 +1,82 @@
+name: GitHub release
+description: >
+  Commits the version, tags it and creates the GitHub Release with semantic-release: @semantic-release/git commits
+  the pom.xml files already set by versions:set (parent and both modules, "chore(release): X.Y.Z [skip ci]"), the
+  git tag points at that commit, and the GitHub Release is created. The published version is then checked against the expected one.
+  With dry-run it only prints the tag and release. Requires a full-history checkout and contents: write.
+
+inputs:
+  version:
+    description: Version computed by the semantic-version action
+    required: true
+  github-token:
+    description: Token used by semantic-release
+    required: true
+  branch:
+    description: Branch being released
+    required: false
+    default: ${{ github.ref_name }}
+  dry-run:
+    description: Print the tag and GitHub Release instead of creating them
+    required: false
+    default: 'false'
+
+outputs:
+  published:
+    description: true when the tag and GitHub Release were created
+    value: ${{ steps.semantic.outputs.new_release_published || 'false' }}
+
+runs:
+  using: composite
+  steps:
+    - name: Tag and release (dry run)
+      if: inputs.dry-run == 'true'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: echo "[dry-run] would create tag $VERSION and GitHub Release $VERSION"
+
+    - name: Prepare release config
+      if: inputs.dry-run != 'true'
+      shell: bash
+      env:
+        BRANCH: ${{ inputs.branch }}
+      run: |
+        bash "$GITHUB_ACTION_PATH/../../scripts/prepare-releaserc.sh" "$BRANCH" > /dev/null
+        # Commit the released pom.xml versions. Added for the publishing run only, so dry runs and branches cut
+        # from older tags (whose actions do not install @semantic-release/git) keep working with the shared config.
+        jq '.plugins |= (.[:-1] + [["@semantic-release/git", {
+              "assets": ["pom.xml", "hello-lib/pom.xml", "hello-service/pom.xml"],
+              "message": "chore(release): ${nextRelease.version} [skip ci]"
+            }]] + .[-1:])' .releaserc.json > "$RUNNER_TEMP/releaserc.json"
+        mv "$RUNNER_TEMP/releaserc.json" .releaserc.json
+        jq -c '[.plugins[] | if type == "array" then .[0] else . end]' .releaserc.json
+
+    - uses: actions/setup-node@v7
+      if: inputs.dry-run != 'true'
+      with:
+        node-version: 24
+
+    - id: semantic
+      if: inputs.dry-run != 'true'
+      uses: cycjimmy/semantic-release-action@v8.1.3
+      with:
+        semantic_version: 25.0.9
+        extra_plugins: |
+          conventional-changelog-conventionalcommits@9.3.1
+          @semantic-release/git@11.0.1
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+
+    - name: Verify published version
+      if: inputs.dry-run != 'true'
+      shell: bash
+      env:
+        EXPECTED: ${{ inputs.version }}
+        PUBLISHED: ${{ steps.semantic.outputs.new_release_published }}
+        ACTUAL: ${{ steps.semantic.outputs.new_release_version }}
+      run: |
+        if [[ "$PUBLISHED" != "true" || "$ACTUAL" != "$EXPECTED" ]]; then
+          echo "::error::Expected release $EXPECTED, semantic-release published '${ACTUAL:-nothing}'. If the branch moved after the version job (local branch behind remote), re-run the Release workflow."
+          exit 1
+        fi
