@@ -36,3 +36,4 @@ jobs:
           requireScope: true
           scopes: |
             CK-\d+
+            deps
