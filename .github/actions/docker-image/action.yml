@@ -28,6 +28,11 @@ inputs:
     required: false
     default: hotfix release
 
+outputs:
+  image:
+    description: Image reference with the version tag (registry/name:version)
+    value: ${{ inputs.registry }}/${{ inputs.service }}:${{ inputs.version }}
+
 runs:
   using: composite
   steps:
