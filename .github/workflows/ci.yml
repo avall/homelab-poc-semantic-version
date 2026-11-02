@@ -69,16 +69,6 @@ jobs:
           goal: install
           deploy-repository: maven-snapshots
 
-      # No Nexus yet: show the simulated snapshot version in big letters as the check of what would be deployed
-      - name: Print snapshot version
-        env:
-          SNAPSHOT_VERSION: ${{ needs.snapshot-version.outputs.snapshot_version }}
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq figlet > /dev/null 2>&1
-          # Spaces around dashes let figlet wrap long versions without cutting a word
-          figlet -w 80 "${SNAPSHOT_VERSION//-/ - }"
-          echo "Snapshot version: ${SNAPSHOT_VERSION}"
-
       - name: Upload test reports
         if: failure()
         uses: actions/upload-artifact@v7
@@ -89,8 +79,16 @@ jobs:
             */target/failsafe-reports/
 
       - name: Build docker snapshot
+        id: docker
         uses: ./.github/actions/docker-image
         with:
           version: ${{ needs.snapshot-version.outputs.snapshot_version }}
           latest: 'false'
           latest-skip-reason: snapshot build
+
+      # No Nexus or registry push yet: show the simulated snapshot version and image in big letters
+      - name: Print snapshot version and docker image
+        uses: ./.github/actions/print-versions
+        with:
+          version: ${{ needs.snapshot-version.outputs.snapshot_version }}
+          image: ${{ steps.docker.outputs.image }}

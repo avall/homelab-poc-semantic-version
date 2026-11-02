@@ -1,0 +1,32 @@
+name: Print versions
+description: >
+  Prints the Maven version and the docker image in big letters (figlet). Nothing is deployed or pushed yet, so this is
+  the visible check of what would be published.
+
+inputs:
+  version:
+    description: Maven version (snapshot or release)
+    required: true
+  image:
+    description: Docker image reference (registry/name:tag)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Print version and docker image
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        IMAGE: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq && sudo apt-get install -y -qq figlet > /dev/null 2>&1
+        # Spaces around separators let figlet wrap long strings at 80 columns without cutting a word
+        banner() { figlet -w 80 "$(printf '%s' "$1" | sed -E 's#([-/:])# \1 #g')"; }
+        echo "Version"
+        banner "$VERSION"
+        echo "Docker image"
+        banner "$IMAGE"
+        echo "Version: ${VERSION}"
+        echo "Docker image: ${IMAGE}"

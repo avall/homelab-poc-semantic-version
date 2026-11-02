@@ -69,11 +69,20 @@ jobs:
           deploy-repository: maven-releases
 
       - name: Build docker images (push printed)
+        id: docker
         if: steps.version.outputs.published == 'true'
         uses: ./.github/actions/docker-image
         with:
           version: ${{ steps.version.outputs.version }}
           latest: ${{ steps.version.outputs.hotfix != 'true' }}
+
+      # No Nexus or registry push yet: show the release version and image in big letters
+      - name: Print release version and docker image
+        if: steps.version.outputs.published == 'true'
+        uses: ./.github/actions/print-versions
+        with:
+          version: ${{ steps.version.outputs.version }}
+          image: ${{ steps.docker.outputs.image }}
 
       - name: Create tag and GitHub Release (semantic-release)
         id: release
