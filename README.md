@@ -41,8 +41,7 @@ gitGraph
   commit id: "feat! CK-3"
   commit id: "rel 3.0.0" tag: "3.0.0"
   checkout hotfix/2.0.1
-  commit id: "fix CK-4"
-  commit id: "rel hotfix" tag: "2.0.2-hotfix.1"
+  commit id: "fix CK-4" tag: "2.0.2-hotfix.1"
   checkout master
   commit id: "fix CK-5"
   commit id: "rel 3.0.1" tag: "3.0.1 (Latest)"
@@ -102,7 +101,7 @@ parent version of both modules:
 | --- | --- | --- | --- |
 | PR build | `<next>-<branch>-SNAPSHOT` | no, CI workspace only | `maven-snapshots` |
 | Release from `master` | `X.Y.Z` | yes, `chore(release): X.Y.Z [skip ci]` | `maven-releases` |
-| Hotfix release | `X.Y.(Z+1)-hotfix.N` | yes, on the hotfix branch | `maven-releases` |
+| Hotfix release | `X.Y.(Z+1)-hotfix.N` | no, CI workspace only (avoids a `pom.xml` conflict with `master`) | `maven-releases` |
 | Local build | last release, as in git | — | only with `-s <settings> deploy` |
 
 The branch keeps parallel PRs apart (two PRs releasing `2.1.0` never overwrite each other). No `-SNAPSHOT` is
@@ -154,7 +153,7 @@ release or Nexus release.
 
 | Item | Before | Hotfix PR into `master` | After Run workflow |
 | --- | --- | --- | --- |
-| `pom.xml` in git (`hotfix/2.0.1`) | `2.0.1` | `2.0.1` | `2.0.2-hotfix.1` (`chore(release)` on the hotfix branch) |
+| `pom.xml` in git (`hotfix/2.0.1`) | `2.0.1` | `2.0.1` | `2.0.1` (not committed; the tag points at the fix commit) |
 | `pom.xml` in git (`master`) | `3.0.0` | `3.0.0` | `3.0.0` (until the PR is merged) |
 | `pom.xml` in CI | — | `3.0.1-hotfix-2.0.1-SNAPSHOT` | `2.0.2-hotfix.1` |
 | Nexus `hello-lib`, `hello-service` | `maven-releases` `2.0.1` | `maven-snapshots` `3.0.1-hotfix-2.0.1-SNAPSHOT` | `maven-releases` `2.0.2-hotfix.1` |
@@ -188,15 +187,31 @@ gh workflow run release.yml --ref hotfix/2.0.1                   # 2.0.2-hotfix.
 Then **merge** the PR (squash: `master` releases the next patch with the fix) or **close** it (`master` is
 unaffected).
 
+Manual steps a hotfix needs (unlike a regular release, which is fully automatic):
+
+1. **Run the Release workflow by hand** on `hotfix/X.Y.Z` (Actions → Release → Run workflow → the hotfix branch,
+   or `gh workflow run release.yml --ref hotfix/X.Y.Z`). `release.yml` runs by itself only on a push to `master`,
+   so nothing releases the hotfix when its PR is created or merged into the hotfix branch.
+2. **Rename the PR `hotfix/X.Y.Z` → `master`** to `fix(CK-XXX): <subject>` (for example
+   `fix(CK-4): port hotfix 2.0.2-hotfix.1 to master`). With more than one commit, GitHub proposes the branch name
+   (`hotfix/2.0.1`) as the title, which fails the `pr-title` check. To open it with the title already set, use
+   `gh pr create --title "fix(CK-XXX): ..."` or the compare URL with `?quick_pull=1&title=<url-encoded title>`.
+3. **Merge that PR only after the last hotfix release**: the merge deletes the hotfix branch
+   (`delete_branch_on_merge`), and the Release workflow cannot run on a branch that no longer exists.
+
 Rules:
 
 - The branch name must be `hotfix/<production tag>`; the base version is read from it.
 - Patch-level changes only (`fix`, `perf`, `revert`).
 - Release every hotfix before "Update branch": once `master` is merged in, hotfix releases are blocked.
-- After a hotfix release the PR conflicts on the `pom.xml` versions: resolve it keeping the `master` version,
-  as the last step before the merge.
+- A hotfix release does **not** commit the `pom.xml` versions: the build sets `X.Y.(Z+1)-hotfix.N` in the CI
+  workspace only and the tag points at the last fix commit. The hotfix branch never changes the version lines, so
+  the PR `hotfix/X.Y.Z` → `master` does not conflict on them. Building the hotfix tag locally gives the base
+  version (`2.0.1`) unless `versions:set` is run first; the published artifacts and images carry the hotfix version.
 - A hotfix runs the workflows as they were at its tag. Tags `1.0.0` and `2.0.0` predate this design, so they
-  cannot be hotfixed with it; hotfixes start with the first tag released by this design.
+  cannot be hotfixed with it; hotfixes start with the first tag released by this design. Hotfix branches cut from
+  tags older than the "no `pom.xml` commit" change still commit the versions and conflict on them: resolve the PR
+  keeping the `master` version, or port the fix commits to `master` with a cherry-pick PR.
 
 ### Two hotfixes at the same time on the same tag
 
@@ -207,9 +222,9 @@ Two production bugs on `2.0.1` (CK-4 and CK-5) are fixed in parallel. The branch
    `fix(CK-4): drain in-flight requests on shutdown`, `CK-5-timeout` → `fix(CK-5): raise the client timeout`.
    The PR checks run against the hotfix base: `snapshot-version` previews `2.0.2-hotfix.1` and `build` deploys
    `2.0.2-hotfix.1-CK-4-drain-SNAPSHOT`.
-2. CK-4 is squash-merged first. **Run workflow** Release on `hotfix/2.0.1` releases `2.0.2-hotfix.1` (CK-4) and
-   commits the `pom.xml` files on the hotfix branch.
-3. The CK-5 PR is now behind (the squash of CK-4 and the release commit): **Update branch**, checks again, merge.
+2. CK-4 is squash-merged first. **Run workflow** Release on `hotfix/2.0.1` releases `2.0.2-hotfix.1` (CK-4),
+   tagging the squash commit of CK-4.
+3. The CK-5 PR is now behind (the squash of CK-4): **Update branch**, checks again, merge.
    The next Run workflow releases `2.0.2-hotfix.2` = `2.0.1` + CK-4 + CK-5. Hotfixes are cumulative.
 4. Production deploys `2.0.2-hotfix.2` (it contains both fixes); `2.0.2-hotfix.1` is skipped or replaced.
 5. One PR `hotfix/2.0.1` → `master` carries both fixes to `master` (after the last hotfix release, see the rules).
@@ -228,18 +243,18 @@ gitGraph
   branch CK-5-timeout
   commit id: "fix CK-5"
   checkout hotfix/2.0.1
-  merge CK-4-drain id: "squash CK-4"
-  commit id: "rel h.1" tag: "2.0.2-hotfix.1"
+  merge CK-4-drain id: "squash CK-4" tag: "2.0.2-hotfix.1"
   checkout CK-5-timeout
   merge hotfix/2.0.1 id: "update"
   checkout hotfix/2.0.1
-  merge CK-5-timeout id: "squash CK-5"
-  commit id: "rel h.2" tag: "2.0.2-hotfix.2"
+  merge CK-5-timeout id: "squash CK-5" tag: "2.0.2-hotfix.2"
   checkout master
   merge hotfix/2.0.1 id: "port" tag: "2.1.1"
 ```
 
-`prod` is the release running in production; `rel` is the `chore(release)` commit of the `pom.xml` files; `update` is the "Update branch" of the CK-5 PR; `port` is the squash of the PR `hotfix/2.0.1` → `master` with both fixes.
+`prod` is the release running in production; each hotfix tag sits on the squash commit of its fix (no
+`chore(release)` commit on the hotfix branch); `update` is the "Update branch" of the CK-5 PR; `port` is the squash
+of the PR `hotfix/2.0.1` → `master` with both fixes.
 
 ```mermaid
 sequenceDiagram
@@ -251,7 +266,7 @@ sequenceDiagram
   A->>H: PR fix(CK-4), squash merge
   B->>H: PR fix(CK-5) open, behind after CK-4
   A->>R: Run workflow on hotfix/2.0.1
-  R-->>H: tag 2.0.2-hotfix.1 (CK-4), chore(release) pom commit
+  R-->>H: tag 2.0.2-hotfix.1 (CK-4) on the squash commit
   B->>H: Update branch, checks, squash merge
   B->>R: Run workflow on hotfix/2.0.1
   R-->>H: tag 2.0.2-hotfix.2 (CK-4 + CK-5)
@@ -259,7 +274,7 @@ sequenceDiagram
 
 | Item | After CK-4 release | After CK-5 release |
 | --- | --- | --- |
-| `pom.xml` in git (`hotfix/2.0.1`) | `2.0.2-hotfix.1` | `2.0.2-hotfix.2` |
+| `pom.xml` in git (`hotfix/2.0.1`) | `2.0.1` (not committed) | `2.0.1` (not committed) |
 | Nexus `hello-lib`, `hello-service` (`maven-releases`) | `2.0.2-hotfix.1` | `2.0.2-hotfix.1`, `2.0.2-hotfix.2` |
 | Image tags | `2.0.2-hotfix.1`, `2.0.2-hotfix.1-oci` | `2.0.2-hotfix.2`, `2.0.2-hotfix.2-oci` (never `latest`) |
 | Git tag / GitHub Release | `2.0.2-hotfix.1`, Pre-release | `2.0.2-hotfix.2`, Pre-release (Latest stays on `master`) |
@@ -273,7 +288,7 @@ What to know:
 - **B without A is not possible** once A is on the branch: revert A with a `revert(CK-4): ...` PR into the hotfix
   branch, which releases the next `hotfix.N`.
 - **Direct pushes** to `hotfix/2.0.1` are accepted but run no checks; with two developers, prefer PRs into the
-  hotfix branch, and pull before pushing because every release adds a `chore(release)` commit there.
+  hotfix branch.
 - **Port to `master`:** the single PR `hotfix/2.0.1` → `master` is squashed into one commit with one title, so
   name both keys in its description, or port each fix with its own cherry-pick PR.
 
@@ -352,7 +367,8 @@ docker compose down -v                                       # stop and wipe Nex
   `PUSH_TO_PROTECTED_BRANCH`. For a personal repository it is a fine-grained PAT of the owner (Contents: read and
   write on this repository), and the **Repository admin** role is in the `master` ruleset bypass list.
   `[skip ci]` keeps the commit from starting another run.
-- **`hotfix/**`**: no pull request rule, direct pushes accepted (the hotfix release commits its `pom.xml` there).
+- **`hotfix/**`**: no pull request rule, direct pushes accepted. The hotfix release only creates the tag and the
+  GitHub Release; it pushes no commit to the hotfix branch.
 - **Ruleset for tags** (all tags): restrict updates and deletions, so a released version never moves. GitHub
   [immutable releases](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases)
   add the same guarantee to release assets.
