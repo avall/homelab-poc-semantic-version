@@ -3,6 +3,7 @@ description: >
   Commits the version, tags it and creates the GitHub Release with semantic-release: @semantic-release/git commits
   the pom.xml files already set by versions:set (parent and both modules, "chore(release): X.Y.Z [skip ci]"), the
   git tag points at that commit, and the GitHub Release is created. The published version is then checked against the expected one.
+  Hotfix releases (hotfix/X.Y.Z) skip the pom.xml commit, so porting the hotfix branch to master does not conflict.
   With dry-run it only prints the tag and release. Requires a full-history checkout and contents: write.
 
 inputs:
@@ -42,7 +43,13 @@ runs:
       env:
         BRANCH: ${{ inputs.branch }}
       run: |
-        bash "$GITHUB_ACTION_PATH/../../scripts/prepare-releaserc.sh" "$BRANCH" > /dev/null
+        hotfix=$(bash "$GITHUB_ACTION_PATH/../../scripts/prepare-releaserc.sh" "$BRANCH")
+        # Hotfix releases do not commit pom.xml: a version change on hotfix/X.Y.Z would conflict with master
+        if [[ "$hotfix" == true ]]; then
+          echo "Hotfix release: pom.xml versions are built but not committed, the tag points at the last fix commit"
+          jq -c '[.plugins[] | if type == "array" then .[0] else . end]' .releaserc.json
+          exit 0
+        fi
         # Commit the released pom.xml versions. Added for the publishing run only, so dry runs and branches cut
         # from older tags (whose actions do not install @semantic-release/git) keep working with the shared config.
         jq '.plugins |= (.[:-1] + [["@semantic-release/git", {
