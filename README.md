@@ -14,7 +14,7 @@ are printed as `[dry-run]` lines.
 | `hello-lib` | `jar` | `GreetingService`, plain Java |
 | `hello-service` | Spring Boot `jar` | `GET /hello` returns `helloworld`, `/actuator/info`, OpenAPI; docker image |
 
-The flow mirrors [cnr-semantic-release-poc](https://github.com/cinarra/cnr-semantic-release-poc) (same `.github`
+The flow mirrors [cnr-semantic-release-poc](https://github.com/avall/cnr-semantic-release-poc) (same `.github`
 layout, workflows, scripts and conventions); only names, modules, runners and the real Nexus deploy differ.
 
 ## Scenario
@@ -204,6 +204,14 @@ Rules:
 - The branch name must be `hotfix/<production tag>`; the base version is read from it.
 - Patch-level changes only (`fix`, `perf`, `revert`).
 - Release every hotfix before "Update branch": once `master` is merged in, hotfix releases are blocked.
+- A deleted hotfix branch is recreated from the latest hotfix tag of its line (`git switch -c hotfix/2.0.1
+  2.0.2-hotfix.1`), never from the production tag. Cut from an older tag, it recomputes a tag that already exists,
+  and the hotfix guard rejects the release before the build: `Tag 2.0.2-hotfix.1 already exists: hotfix/2.0.1 must
+  start from the latest hotfix tag 2.0.2-hotfix.1`.
+- Known risk: for SemVer, `2.0.2-hotfix.N` is a pre-release of `2.0.2` and sorts **below** it. When `master` has
+  already released `2.0.2`, tools that compare versions (Maven ranges, Renovate, Dependabot) treat `2.0.2` as newer
+  than the hotfix although it does not contain the fix. Pin hotfix versions explicitly; never resolve them through
+  version ranges.
 - A hotfix release does **not** commit the `pom.xml` versions: the build sets `X.Y.(Z+1)-hotfix.N` in the CI
   workspace only and the tag points at the last fix commit. The hotfix branch never changes the version lines, so
   the PR `hotfix/X.Y.Z` → `master` does not conflict on them. Building the hotfix tag locally gives the base
